@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+# One member per workflow binary. Each is a self-contained CLI (its own
+# `main.rs`, README, CHANGELOG, LICENSE) that composes the VCS clients below
+# into a useful Git / jj / GitHub sequence. Add a crate under `crates/` and list
+# it here.
+members = ["crates/commit"]
+
+# Metadata shared by every crate in the workspace. Members inherit these with
+# `field.workspace = true`. `version` lives here on purpose: the tools share one
+# version and release together (see CHANGELOG.md / .github/workflows/release.yml).
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ZelAnton/vcs-flow-rs"
+authors = ["Anton Zhelezniakou <github@zelanton.net>"]
+# Minimum Supported Rust Version. 1.88 is the floor our dependencies impose
+# (`processkit` 0.3 requires 1.88); edition 2024 alone only needs 1.85. Raise
+# this and the `msrv` CI job together when a dependency or language feature
+# needs newer.
+rust-version = "1.88"
+
+# ---------------------------------------------------------------------------
+# Workspace dependencies
+#
+# Convention (see AGENTS.md "Dependency management"): this workspace fixes NO
+# allow-list of crates. Declare a dependency here once and reference it from a
+# member with `<crate>.workspace = true`. Give every entry an inline comment
+# explaining *why* it's here. Pin major versions, enable only the features used,
+# and keep Cargo.lock committed.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# Job-backed process launcher (Windows Job Object / Linux cgroup) that the VCS
+# clients build on, so a git/jj/gh subprocess tree dies with the tool — no
+# orphans. Also re-exported `Error`/`Result`/`ProcessResult`.
+processkit = "0.3"
+# Typed Git CLI client (`Git` / `GitApi`). Drives `git` through processkit.
+vcs-git = "0.1"
+# Typed Jujutsu CLI client (`Jj` / `JjApi`). Drives `jj` through processkit.
+vcs-jj = "0.1"
+# Typed GitHub CLI client (`GitHub` / `GitHubApi`). Drives `gh` through processkit.
+vcs-github = "0.1"
+# Async runtime: the VCS client traits are `async fn`, so every binary needs an
+# executor (`#[tokio::main]`).
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Declarative CLI arg parsing (derive). The shared front-end for every binary.
+clap = { version = "4", features = ["derive"] }

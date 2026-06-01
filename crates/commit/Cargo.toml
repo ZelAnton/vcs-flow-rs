@@ -1,0 +1,28 @@
+[package]
+# The crate name `commit` is squatted on crates.io, so the package is published
+# as `vcs-flow-commit`; the binary below is still named `commit` (`commit.exe`).
+name = "vcs-flow-commit"
+description = "Create a commit from the current working-copy change (jj/git)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["vcs", "jj", "jujutsu", "git", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+# The installed/built binary is `commit` (`commit.exe`), independent of the
+# crates.io package name above.
+[[bin]]
+name = "commit"
+path = "src/main.rs"
+
+[dependencies]
+# Drives `jj` to create the commit; re-exports the structured `Error`/`Result`.
+vcs-jj.workspace = true
+# Async runtime for the async `JjApi` trait.
+tokio.workspace = true
+# CLI arg parsing (the `-m/--message` flag).
+clap.workspace = true

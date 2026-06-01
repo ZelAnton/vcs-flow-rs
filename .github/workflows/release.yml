@@ -1,0 +1,400 @@
+name: Release
+
+# Manual release workflow for the whole workspace. Needs the `CRATES_IO_TOKEN`
+# repository secret to publish to crates.io.
+#
+# Shipped ENABLED: it is `workflow_dispatch`-only with no `push:`/tag trigger, so
+# it never runs on its own — you click "Run workflow" in the Actions UI and pick
+# a bump type. The version number is never typed by hand: pick patch/minor/major
+# and the source-of-truth (`[workspace.package].version` in Cargo.toml) drives
+# everything, then gets committed back so the manifest, the git tag, and the
+# GitHub Release never drift apart. The first release (no `v*` tag yet) ships the
+# current version as-is, ignoring the bump.
+#
+# Shared-version workspace: all crates inherit one version and release together
+# under a single `v<version>` tag. The publish steps discover every publishable
+# workspace member and publish each. The binaries are self-contained (no
+# intra-workspace dependencies), so members publish in any order.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump type (ignored on the first release)
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+# Never run two releases at once — they both bump + commit to the branch.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the version-bump commit + tag, and create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history + tags, for version math and git-cliff
+
+      # We always release from `main`. workflow_dispatch still lets you pick any
+      # ref in the "Use workflow from" dropdown, so reject anything else up front
+      # rather than silently bumping + tagging some other branch.
+      - name: Require main
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Releases must run from main (got '${{ github.ref }}'). Re-run with 'Use workflow from: main'."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Fail fast (in seconds) if the publish credential is missing — before the
+      # slow build / version bump / changelog work — and with a clear message
+      # instead of cargo's opaque auth error.
+      - name: Preflight — require CRATES_IO_TOKEN
+        env:
+          TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::CRATES_IO_TOKEN secret is not set. Add it under repo Settings → Secrets and variables → Actions before releasing."
+            exit 1
+          fi
+
+      - name: Install tooling
+        run: cargo install cargo-edit --locked
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2
+
+      # Compute the next version from [workspace.package].version — never typed
+      # by hand. `bump` is a fixed choice (not free-form), so interpolating it is
+      # not a script-injection risk; derived outputs flow to later steps via
+      # `env:` rather than re-interpolation.
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT=$(grep -m1 -oP '(?<=^version = ")[^"]+' Cargo.toml)
+          if [[ ! "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not parse version from Cargo.toml (got '$CURRENT')"
+            exit 1
+          fi
+          if git tag --list 'v*' | grep -q .; then
+            # A prior release exists: apply the chosen bump.
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            case "${{ inputs.bump }}" in
+              major) NEW="$((MAJOR+1)).0.0" ;;
+              minor) NEW="${MAJOR}.$((MINOR+1)).0" ;;
+              patch) NEW="${MAJOR}.${MINOR}.$((PATCH+1))" ;;
+            esac
+            PREV="v$CURRENT"
+          else
+            # First release: ship the current version as-is.
+            NEW="$CURRENT"
+            PREV=""
+          fi
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$NEW (previous: ${PREV:-none})"
+
+      - name: Verify tag does not exist
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists"
+            exit 1
+          fi
+
+      # No-op on the first release (already at the current version). In a
+      # workspace, all members inherit `version.workspace = true`, so this bumps
+      # the single [workspace.package] version.
+      - name: Bump version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: cargo set-version "$VERSION"
+
+      # Manual bullets always win. Only when [Unreleased] has no real bullets do
+      # we fill it from commit subjects since the previous tag (or full history
+      # on the first release), using cliff.toml's prefix→section rules.
+      - name: Auto-fill empty [Unreleased] from git log
+        env:
+          PREV_TAG: ${{ steps.version.outputs.prev_tag }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          prev_tag = os.environ.get("PREV_TAG", "")
+          path = pathlib.Path("CHANGELOG.md")
+          text = path.read_text()
+
+          # Capture the [Unreleased] body up to the next version section, the
+          # reference-link block, or EOF (the link-block stop matters on a first
+          # release, where [Unreleased] is the last `##` section).
+          m = re.search(r"^## \[Unreleased\]\s*\n(.*?)(?=^## \[|^\[[^\]]+\]:|\Z)", text, re.M | re.S)
+          if not m:
+              print("::error::Could not find '## [Unreleased]' header in CHANGELOG.md", file=sys.stderr)
+              sys.exit(1)
+
+          body = m.group(1)
+          has_real_bullets = any(re.match(r"^-\s+\S", ln) for ln in body.splitlines())
+          if has_real_bullets:
+              print("[Unreleased] already has manual entries; skipping auto-fill.")
+              sys.exit(0)
+
+          tag_exists = bool(prev_tag) and subprocess.run(
+              ["git", "rev-parse", "--verify", prev_tag], capture_output=True
+          ).returncode == 0
+
+          if tag_exists:
+              print(f"[Unreleased] is empty; generating from git log since {prev_tag}...")
+              cliff_cmd = ["git-cliff", "--config", "cliff.toml", "--strip", "all", f"{prev_tag}..HEAD"]
+          else:
+              print("[Unreleased] is empty; generating from full git history...")
+              cliff_cmd = ["git-cliff", "--config", "cliff.toml", "--strip", "all"]
+          empty_hint = (
+              "::error::No release-worthy commits found. Either add a manual entry to "
+              "[Unreleased] in CHANGELOG.md, or commit changes with a recognised prefix "
+              "(feat/fix/perf/ux/refactor/remove/...)."
+          )
+
+          result = subprocess.run(cliff_cmd, capture_output=True, text=True)
+          if result.returncode != 0:
+              print(f"::error::git-cliff failed: {result.stderr.strip()}", file=sys.stderr)
+              sys.exit(1)
+          generated = result.stdout.strip()
+          if not generated:
+              print(empty_hint, file=sys.stderr)
+              sys.exit(1)
+
+          new_text = text[: m.start(1)] + generated + "\n\n" + text[m.end(1) :]
+          path.write_text(new_text)
+          print("----- auto-generated [Unreleased] body -----")
+          print(generated)
+          print("--------------------------------------------")
+          PY
+
+      # Curate release notes from [Unreleased]: keep only "### Header" sections
+      # that have at least one real bullet, dropping placeholder "-" lines.
+      # Written OUTSIDE the working tree ($RUNNER_TEMP) so it neither dirties the
+      # tree (which would abort `cargo publish`) nor lands in a packaged crate.
+      - name: Extract release notes
+        env:
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          m = re.search(r"^## \[Unreleased\]\s*\n(.*?)(?=^## \[|^\[[^\]]+\]:|\Z)", text, re.M | re.S)
+          body = (m.group(1) if m else "").strip()
+
+          parts = re.split(r"(?m)(^### .+$)", body)
+          out = []
+          for i in range(1, len(parts), 2):
+              header = parts[i]
+              section = parts[i + 1] if i + 1 < len(parts) else ""
+              bullets = [ln for ln in section.splitlines() if re.match(r"^-\s+\S", ln)]
+              if bullets:
+                  if out:
+                      out.append("")
+                  out.append(header)
+                  out.extend(bullets)
+
+          result = "\n".join(out).strip()
+          if not result:
+              print(
+                  "::error::[Unreleased] section in CHANGELOG.md is empty. "
+                  "Add release notes before releasing.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          pathlib.Path(os.environ["NOTES_FILE"]).write_text(result + "\n")
+          print("----- release notes -----")
+          print(result)
+          print("-------------------------")
+          PY
+
+      # Rename the curated `## [Unreleased]` heading to the new version + date,
+      # leave a fresh empty Unreleased above it, and rewrite the reference links.
+      - name: Promote [Unreleased] in CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PREV_TAG: ${{ steps.version.outputs.prev_tag }}
+          REPO: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+          from datetime import datetime, timezone
+
+          version = os.environ["VERSION"]
+          tag = os.environ["TAG"]
+          prev_tag = os.environ.get("PREV_TAG", "")
+          repo = os.environ["REPO"]
+          date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+          path = pathlib.Path("CHANGELOG.md")
+          text = path.read_text()
+
+          new_unreleased = (
+              "## [Unreleased]\n\n"
+              "### Added\n-\n\n"
+              "### Changed\n-\n\n"
+              "### Fixed\n-\n\n"
+              f"## [{version}] - {date}"
+          )
+          text, n = re.subn(r"^## \[Unreleased\]$", new_unreleased, text, count=1, flags=re.M)
+          if n != 1:
+              print("::error::Could not find '## [Unreleased]' header in CHANGELOG.md", file=sys.stderr)
+              sys.exit(1)
+
+          if prev_tag:
+              version_link = f"[{version}]: {repo}/compare/{prev_tag}...{tag}"
+          else:
+              version_link = f"[{version}]: {repo}/releases/tag/{tag}"
+          link_replacement = f"[Unreleased]: {repo}/compare/{tag}...HEAD\n{version_link}"
+          text, n = re.subn(r"^\[Unreleased\]:.*$", link_replacement, text, count=1, flags=re.M)
+          if n != 1:
+              print("::error::Could not find '[Unreleased]: ...' reference link in CHANGELOG.md", file=sys.stderr)
+              sys.exit(1)
+
+          path.write_text(text)
+          print(f"Promoted [Unreleased] -> [{version}] - {date}")
+          PY
+
+      # Commit the bump + changelog locally (NOT pushed yet) so the next steps can
+      # verify against a clean tree, and the tag — once created — points at it.
+      - name: Commit version bump + changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Stage exactly the release artifacts. (release-notes.md lives in
+          # $RUNNER_TEMP, outside the tree, so it is never a candidate here.)
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "Release v${VERSION}"
+
+      # Gate: build + package every publishable member exactly as `cargo publish`
+      # would, but without uploading — catches build/packaging/metadata errors
+      # before the irreversible publish below. `--locked` asserts Cargo.lock
+      # matches the just-bumped manifest so the dry run can't re-resolve and
+      # dirty the tree. No token needed for a dry run.
+      - name: Verify crates publish (dry run)
+        run: |
+          set -euo pipefail
+          members=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name')
+          if [ -z "$members" ]; then
+            echo "::error::No publishable workspace members found."
+            exit 1
+          fi
+          for pkg in $members; do
+            echo "::group::dry-run $pkg"
+            cargo publish -p "$pkg" --locked --dry-run
+            echo "::endgroup::"
+          done
+
+      # Publish every member to crates.io BEFORE the tag/push/Release. crates.io
+      # is the only irreversible step (a version can never be re-published), so
+      # doing it first means a failed publish leaves NO stranded tag — you just
+      # re-run. Retry to ride out transient errors; an "already uploaded" result
+      # (a prior run that published but failed before tagging) counts as success.
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -uo pipefail
+          members=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name')
+          publish_one() {
+            local pkg="$1" attempt=0 max=3 out
+            while :; do
+              attempt=$((attempt + 1))
+              if out="$(cargo publish -p "$pkg" --locked 2>&1)"; then
+                printf '%s\n' "$out"
+                return 0
+              fi
+              printf '%s\n' "$out"
+              # Treat "this exact version is already published" as success.
+              if printf '%s' "$out" | grep -qiE 'crate version .* is already uploaded|already exists on [^[:space:]]*crates\.io index'; then
+                echo "::notice::$pkg is already on crates.io — treating as published."
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::cargo publish for $pkg failed after ${max} attempts."
+                return 1
+              fi
+              echo "::warning::publish $pkg attempt ${attempt} failed; retrying in 30s..."
+              sleep 30
+            done
+          }
+          for pkg in $members; do
+            echo "::group::publish $pkg"
+            publish_one "$pkg" || exit 1
+            echo "::endgroup::"
+          done
+
+      # Only after the crates are live: tag the release and push the commit + tag
+      # atomically (if either ref is rejected, neither lands). checkout@v5 leaves
+      # a detached HEAD, so the branch is named explicitly. We always release
+      # from main (enforced above).
+      - name: Tag and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "v${VERSION}"
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/v${VERSION}"
+
+      # The tag now exists; attach the Release using the curated notes. Idempotent
+      # + retried so it is not the step that fails a release whose crates already
+      # published. If it still fails, finish by hand and do NOT re-run.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: |
+          set -uo pipefail
+          attempt=0
+          max=3
+          while :; do
+            attempt=$((attempt + 1))
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" && break
+            else
+              gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" && break
+            fi
+            if [ "$attempt" -ge "$max" ]; then
+              echo "::error::${TAG} is PUBLISHED to crates.io and the tag is pushed, but creating the GitHub Release failed. Finish it by hand: gh release create ${TAG} --notes-file <notes>. Do NOT re-run this workflow."
+              exit 1
+            fi
+            echo "::warning::GitHub Release attempt ${attempt} failed; retrying in 15s..."
+            sleep 15
+          done
