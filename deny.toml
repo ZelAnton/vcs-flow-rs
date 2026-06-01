@@ -5,6 +5,11 @@
 # Fail on crates with a RustSec security advisory or that have been yanked.
 version = 2
 yanked = "deny"
+# "unmaintained" advisories are quality signals, not vulnerabilities. Only fail
+# when a crate WE depend on directly is unmaintained — deep transitive deps of
+# well-kept crates (e.g. bincode/paste pulled in by syntect/ratatui) are out of
+# our control and would otherwise make `check advisories` perpetually red.
+unmaintained = "workspace"
 
 [bans]
 # Duplicate versions of the same crate are a warning, not a hard failure.

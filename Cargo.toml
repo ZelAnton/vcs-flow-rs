@@ -46,3 +46,25 @@ vcs-github = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Declarative CLI arg parsing (derive). The shared front-end for every binary.
 clap = { version = "4", features = ["derive"] }
+
+# --- Terminal UI stack (used by interactive tools like `commit`) -------------
+# These three are version-locked together: tui-textarea 0.7 and tui-tree-widget
+# 0.23 both require ratatui ^0.29 (ratatui 0.30 would need tui-tree-widget 0.24,
+# but tui-textarea has no 0.30 build yet). ratatui 0.29 bundles crossterm 0.28,
+# which we consume via `ratatui::crossterm` rather than a separate dep so there's
+# only one crossterm version in the tree.
+# Immediate-mode TUI framework: layouts, widgets, terminal backend.
+ratatui = "0.29"
+# Collapsible tree widget for the file picker (expand/collapse, selection state).
+tui-tree-widget = "0.23"
+# Multi-line text editor widget for the commit-message screen.
+tui-textarea = "0.7"
+# Syntax highlighting for diff rendering. `regex-fancy` uses the pure-Rust
+# fancy-regex engine instead of the default C oniguruma — keeps Windows/Linux and
+# static builds toolchain-free; `default-syntaxes`/`default-themes` embed the
+# built-in language + theme dumps.
+syntect = { version = "5", default-features = false, features = [
+  "default-syntaxes",
+  "default-themes",
+  "regex-fancy",
+] }

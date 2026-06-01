@@ -2,7 +2,7 @@
 # The crate name `commit` is squatted on crates.io, so the package is published
 # as `vcs-flow-commit`; the binary below is still named `commit` (`commit.exe`).
 name = "vcs-flow-commit"
-description = "Create a commit from the current working-copy change (jj/git)."
+description = "Interactive TUI to stage-free pick changed files, preview diffs, and commit to git or jj."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,9 +20,20 @@ name = "commit"
 path = "src/main.rs"
 
 [dependencies]
-# Drives `jj` to create the commit; re-exports the structured `Error`/`Result`.
+# Typed jj client for jj/colocated repos; also re-exports `processkit` (the
+# `Error`/`Result`/`ProcessResult` types and the `run`/`run_raw` escape hatch we
+# use for diffs, templates, and revsets the 0.1 API doesn't cover).
 vcs-jj.workspace = true
-# Async runtime for the async `JjApi` trait.
+# Typed git client for git-only repos (status, current branch, commit + the
+# `run` escape hatch for diffs/amend).
+vcs-git.workspace = true
+# Async runtime for the async `JjApi`/`GitApi` traits.
 tokio.workspace = true
-# CLI arg parsing (the `-m/--message` flag).
+# CLI arg parsing (`--dir`, `--amend`).
 clap.workspace = true
+# Terminal UI: framework, file tree, message editor (crossterm via `ratatui::crossterm`).
+ratatui.workspace = true
+tui-tree-widget.workspace = true
+tui-textarea.workspace = true
+# Syntax highlighting for the diff pane.
+syntect.workspace = true

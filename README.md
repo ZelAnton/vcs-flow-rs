@@ -15,7 +15,7 @@ launcher [`processkit`](https://crates.io/crates/processkit).
 
 | Binary | Crate | What it does |
 |---|---|---|
-| `commit` | `vcs-flow-commit` | Create a commit from the current working-copy change (`jj commit`). |
+| `commit` | `vcs-flow-commit` | Interactive TUI: pick changed files (ignoring the index), preview syntax-highlighted diffs, write a message, and commit to git or jj. |
 
 More tools land as their own `crates/<name>` member. All crates share one
 version and release together.
@@ -24,7 +24,7 @@ version and release together.
 
 ```bash
 cargo build                       # build the whole workspace
-cargo run -p vcs-flow-commit -- -m "message"   # run the commit tool
+cargo run -p vcs-flow-commit      # run the commit tool (interactive)
 cargo install --path crates/commit             # install `commit` onto your PATH
 cargo test                        # all unit + integration tests
 cargo clippy --all-targets -- -D warnings

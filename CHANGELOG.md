@@ -15,10 +15,13 @@ to a dated version section.
 
 ### Added
 - Workspace skeleton (shared-version Cargo workspace, strict CI, cargo-deny, MSRV check).
-- `commit` binary (`vcs-flow-commit`): create a commit from the working-copy change via `jj`.
+- `commit` binary (`vcs-flow-commit`): interactive TUI to pick changed files
+  (ignoring the index) as a path-compressed tree with tri-state selection,
+  preview syntax-highlighted diffs, edit the message, optionally amend, and
+  commit to the current git branch or the nearest jj bookmark.
 
 ### Changed
--
+- Raised MSRV to 1.88 (required by the `processkit` dependency).
 
 ### Fixed
 -

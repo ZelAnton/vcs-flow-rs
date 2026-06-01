@@ -29,6 +29,14 @@ Key facts:
   wired (`.github/workflows/release.yml`). The npm wrapper packages are a planned
   follow-up (model them on the sibling `agent-workspace` / `DevKit` `npm/*/bin`
   layout).
+- **TUI tools use ratatui.** The `commit` binary is a full-screen TUI built on
+  `ratatui` 0.29 + `tui-tree-widget` 0.23 + `tui-textarea` 0.7 (version-locked —
+  see the `[workspace.dependencies]` comment) and `syntect` for diff highlighting.
+  Its modules split cleanly: `repo`/`vcs` (backend + git/jj command sequences via
+  the clients' `run` escape hatch), `tree` (path-compressed tree + tri-state
+  selection — pure, unit-tested), `model`, and `ui/*` (ratatui screens). The
+  pure logic and command-arg builders are unit-tested; the live event loop needs
+  a real terminal, so it's verified manually (`cargo run -p vcs-flow-commit`).
 
 ### Adding a new tool
 
@@ -46,7 +54,7 @@ Key facts:
 ```bash
 cargo build                       # build the whole workspace
 cargo build -p <crate>            # one crate
-cargo run -p vcs-flow-commit -- -m "msg"   # run a tool
+cargo run -p vcs-flow-commit               # run a tool (commit is interactive)
 cargo test                        # all unit + integration tests
 cargo test -p <crate>             # one crate's tests
 cargo test -- --ignored           # the real-binary tests (need git/jj/gh installed)

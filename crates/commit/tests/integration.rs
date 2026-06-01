@@ -22,12 +22,12 @@ fn prints_version() {
 }
 
 #[test]
-fn help_mentions_message_flag() {
+fn help_mentions_amend_flag() {
     let output = Command::new(COMMIT_BIN)
         .arg("--help")
         .output()
         .expect("run commit --help");
     assert!(output.status.success(), "exit status: {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--message"), "help output: {stdout}");
+    assert!(stdout.contains("--amend"), "help output: {stdout}");
 }
