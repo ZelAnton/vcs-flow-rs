@@ -22,6 +22,9 @@ pub const DEFAULT_MODEL: &str = "gpt-5.4-mini";
 /// Env var that overrides every settings file.
 const MODEL_ENV: &str = "COMMIT_AI_MODEL";
 
+/// Env var overriding the pull strategy.
+const PULL_ENV: &str = "COMMIT_PULL_STRATEGY";
+
 /// Per-repo override file name (lives in the repo root, version-control-excluded).
 const REPO_FILE: &str = ".vcs-flow-commit.toml";
 
@@ -35,13 +38,26 @@ pub enum ModelSource {
     Default,
 }
 
+/// How `commit` integrates remote commits when the local branch is behind, before
+/// pushing. Governs the **git** backend; jj always rebases (merging bookmarks is
+/// not idiomatic in jj).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PullStrategy {
+    #[default]
+    Merge,
+    Rebase,
+}
+
 /// The on-disk settings shape. Extensible: unknown future keys would need their
-/// own fields, but `model` is all we persist today.
+/// own fields.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// The copilot model name. `None` → fall through to the next source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Pull strategy (`"merge"` / `"rebase"`). `None` → fall through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<String>,
 }
 
 /// The user-level config path (`<config_dir>/vcs-flow/commit.toml`), or `None`
@@ -105,6 +121,34 @@ fn pick_model(
         }
     }
     (DEFAULT_MODEL.to_string(), ModelSource::Default)
+}
+
+/// Resolve the pull strategy for `root`: `COMMIT_PULL_STRATEGY` env → repo file →
+/// user file → default ([`PullStrategy::Merge`]). Unrecognised values fall through
+/// to the next source (a typo never silently flips the strategy).
+pub fn pull_strategy(root: &Path) -> PullStrategy {
+    let env = std::env::var(PULL_ENV).ok();
+    let repo = read(&repo_path(root)).pull;
+    let user = user_path().map(|p| read(&p)).and_then(|s| s.pull);
+    pick_pull(env, repo, user)
+}
+
+/// Pure precedence for the pull strategy. Split out for filesystem-free testing.
+fn pick_pull(env: Option<String>, repo: Option<String>, user: Option<String>) -> PullStrategy {
+    [env, repo, user]
+        .into_iter()
+        .flatten()
+        .find_map(|s| parse_pull(&s))
+        .unwrap_or_default()
+}
+
+/// Parse a pull-strategy string; `None` for blank/unrecognised (so it falls through).
+fn parse_pull(s: &str) -> Option<PullStrategy> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "merge" => Some(PullStrategy::Merge),
+        "rebase" => Some(PullStrategy::Rebase),
+        _ => None,
+    }
 }
 
 /// Persist `model` to the source it should live in: the per-repo override file
@@ -218,9 +262,39 @@ mod tests {
     }
 
     #[test]
+    fn pull_strategy_precedence_and_parsing() {
+        // env > repo > user, unrecognised falls through, default is Merge.
+        assert_eq!(
+            pick_pull(Some("rebase".into()), Some("merge".into()), None),
+            PullStrategy::Rebase
+        );
+        assert_eq!(
+            pick_pull(
+                Some("bogus".into()),
+                Some("rebase".into()),
+                Some("merge".into())
+            ),
+            PullStrategy::Rebase
+        );
+        assert_eq!(
+            pick_pull(None, None, Some("MERGE".into())),
+            PullStrategy::Merge
+        );
+        assert_eq!(pick_pull(None, None, None), PullStrategy::Merge);
+        // A blank/garbage repo value falls through to the user value.
+        assert_eq!(
+            pick_pull(None, Some("  ".into()), Some("rebase".into())),
+            PullStrategy::Rebase
+        );
+        assert_eq!(parse_pull(" Rebase "), Some(PullStrategy::Rebase));
+        assert_eq!(parse_pull("squash"), None);
+    }
+
+    #[test]
     fn settings_toml_round_trips() {
         let s = Settings {
             model: Some("gpt-5.2".into()),
+            ..Default::default()
         };
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("model = \"gpt-5.2\""));

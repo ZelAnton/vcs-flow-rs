@@ -84,6 +84,27 @@ order (first wins):
   several bookmarks are equally near, you pick one first. Amend squashes the
   selected paths into the nearest bookmark's existing commit instead.
 
+## Pushing
+
+After a (non-amend) commit, `commit` offers to push to `origin`. On agreement it:
+
+1. **Resolves the remote branch.** If your branch/bookmark already tracks a remote
+   branch, it uses that. Otherwise it looks for a **same-named** remote branch and
+   tracks it. If there's no match, a **filterable picker** of existing remote
+   branches opens — type to narrow, **Enter** attaches to the highlighted branch,
+   **Ctrl+N** pushes as a new same-named branch, **Esc** cancels.
+2. **Pulls if behind.** It fetches and, if the local branch is behind the remote,
+   integrates the remote commits first. The strategy is **merge** by default; set
+   `pull = "rebase"` in a settings file (or `COMMIT_PULL_STRATEGY=rebase`) to rebase
+   instead. (The setting governs git; jj always rebases the bookmark onto the
+   remote.) If integration conflicts, `commit` lists the conflicted files and waits
+   — resolve and stage them in your own editor, press Enter, and it re-checks and
+   pushes once clean (or type `a` to abort).
+3. **Pushes**, setting upstream when the branch was untracked.
+
+Amended commits are not auto-pushed (rewriting an already-pushed tip needs a manual
+force push).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -24,6 +24,12 @@ to a dated version section.
   from the selected diff (seeded by the existing jj change description); `Esc`
   skips it. Best-effort — falls back to the existing description if `copilot` is
   missing or fails.
+- `commit`: after a (non-amend) commit, offers to push to `origin`. Resolves the
+  remote branch (existing upstream → same-named remote → a filterable picker of
+  remote branches, with `Ctrl+N` to push as a new same-named branch); fetches and, if
+  the local branch is behind, integrates remote commits first — `merge` by default,
+  `rebase` via the `pull` setting / `COMMIT_PULL_STRATEGY` (jj always rebases) —
+  pausing for the user to resolve any conflicts before pushing.
 - `commit`: model selection with persistence. When copilot reports the configured
   model is unavailable, the TUI prompts for another name and saves the working one
   back to the source it came from (the per-repo file, else the per-user file). The

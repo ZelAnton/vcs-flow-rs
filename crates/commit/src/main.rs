@@ -7,6 +7,7 @@
 
 mod ai;
 mod model;
+mod push;
 mod repo;
 mod settings;
 mod tree;
@@ -116,6 +117,13 @@ async fn run() -> AppResult<ExitCode> {
         .commit(&paths, &plan.message, plan.amend, &plan.target)
         .await?;
     println!("{}", success_line(backend.kind(), &plan, file_count));
+
+    // Offer to push the fresh commit. Skipped for amend: rewriting an already-pushed
+    // tip needs a force push, which is out of scope (and the behind-check would try
+    // to merge the pre-amend remote commit back in).
+    if !plan.amend {
+        push::offer(&backend, &plan.target).await?;
+    }
     Ok(ExitCode::SUCCESS)
 }
 

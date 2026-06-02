@@ -4,6 +4,7 @@
 pub mod busy;
 pub mod diff;
 pub mod editor;
+pub mod filter;
 pub mod input;
 pub mod menu;
 pub mod select;
