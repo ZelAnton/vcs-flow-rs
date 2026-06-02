@@ -1,8 +1,10 @@
 //! Terminal UI: the file-select, bookmark-menu, and message-editor screens, plus
 //! the terminal lifecycle and diff highlighting.
 
+pub mod busy;
 pub mod diff;
 pub mod editor;
+pub mod input;
 pub mod menu;
 pub mod select;
 pub mod terminal;

@@ -29,6 +29,13 @@ vcs-jj.workspace = true
 vcs-git.workspace = true
 # Async runtime for the async `JjApi`/`GitApi` traits.
 tokio.workspace = true
+# Spawn the `copilot` CLI for AI message drafting inside a job, so the subprocess
+# dies with the tool (same launcher the vcs clients use) — see `ai.rs`.
+processkit.workspace = true
+# Persist the chosen AI model in per-user / per-repo settings files (`settings.rs`).
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
 # CLI arg parsing (`--dir`, `--amend`).
 clap.workspace = true
 # Terminal UI: framework, file tree, message editor (crossterm via `ratatui::crossterm`).

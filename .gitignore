@@ -14,6 +14,10 @@ progress.md
 !.claude/**
 .claude/settings.local.json
 
+# Per-repo `commit` settings override (AI model name). Written/read locally and
+# auto-added to .git/info/exclude at runtime; listed here too for dev hygiene.
+.vcs-flow-commit.toml
+
 # Rust
 **/*.rs.bk
 *.pdb

@@ -34,7 +34,9 @@ Key facts:
   see the `[workspace.dependencies]` comment) and `syntect` for diff highlighting.
   Its modules split cleanly: `repo`/`vcs` (backend + git/jj command sequences via
   the clients' `run` escape hatch), `tree` (path-compressed tree + tri-state
-  selection — pure, unit-tested), `model`, and `ui/*` (ratatui screens). The
+  selection — pure, unit-tested), `model`, `ai` (Copilot-CLI commit-message
+  drafting via `processkit`), `settings` (per-user / per-repo AI model config,
+  TOML), and `ui/*` (ratatui screens). The
   pure logic and command-arg builders are unit-tested; the live event loop needs
   a real terminal, so it's verified manually (`cargo run -p vcs-flow-commit`).
 

@@ -46,6 +46,13 @@ vcs-github = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Declarative CLI arg parsing (derive). The shared front-end for every binary.
 clap = { version = "4", features = ["derive"] }
+# Serde + TOML for reading/writing the small per-user / per-repo settings files
+# (e.g. the AI model name `commit` persists). Derive for the settings struct.
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+# Cross-platform per-user config directory (`%APPDATA%` / `$XDG_CONFIG_HOME` /
+# `~/Library/Application Support`) for the user-level settings file.
+dirs = "6"
 
 # --- Terminal UI stack (used by interactive tools like `commit`) -------------
 # These three are version-locked together: tui-textarea 0.7 and tui-tree-widget

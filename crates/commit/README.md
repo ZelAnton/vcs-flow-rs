@@ -44,8 +44,32 @@ land (git branch / jj bookmark).
 | `Ctrl+Enter` or `Ctrl+S` | confirm → opens the message editor |
 | `Esc` / `q` | cancel |
 
-In the message editor, `Ctrl+Enter` / `Ctrl+S` commits and `Esc` cancels. For a
-jj repo the editor is pre-filled with the change's current description.
+In the message editor, `Ctrl+Enter` / `Ctrl+S` commits and `Esc` cancels. The
+editor is pre-filled with an AI-drafted message: if the [GitHub Copilot CLI]
+(`copilot`) is on `PATH`, the message is generated from the selected diff (plus
+the existing jj change description as context) — a "Generating…" screen shows
+while it runs, and `Esc` skips it. Without copilot (or if it fails) the editor
+falls back to the change's current description (jj) or an empty message (git).
+
+### Choosing the AI model
+
+If copilot reports the configured model is unavailable, `commit` asks you to type
+another model name and retries; the working name is saved back to whichever source
+supplied the failing one (the per-repo file if a repo override was in effect,
+otherwise your user settings) so later runs use it. The model is resolved in this
+order (first wins):
+
+1. the `COMMIT_AI_MODEL` environment variable;
+2. a per-repo override file `.vcs-flow-commit.toml` in the repo root
+   (`model = "…"`) — kept out of version control so it is never committed or
+   pushed: a `.git/info/exclude` entry for a colocated git repo, or a `.gitignore`
+   entry for a worktree / pure-jj repo;
+3. the per-user config file (`model = "…"`) at the platform config dir,
+   e.g. `%APPDATA%\vcs-flow\commit.toml` (Windows) or
+   `~/.config/vcs-flow/commit.toml` (Linux);
+4. the built-in default `gpt-5.4-mini`.
+
+[GitHub Copilot CLI]: https://github.com/github/copilot-cli
 
 > `Ctrl+Enter` needs a terminal that reports it (most modern ones do); `Ctrl+S`
 > is the universal fallback.
