@@ -40,6 +40,14 @@ to a dated version section.
 
 ### Changed
 - Raised MSRV to 1.88 (required by the `processkit` dependency).
+- Upgraded to `processkit` 0.5 and `vcs-git`/`vcs-jj` 0.3, and adopted the new
+  [`vcs-core`](https://crates.io/crates/vcs-core) facade: `commit`'s `vcs` backend
+  now wraps `vcs_core::Repo` (detection via `vcs_core::detect`, dispatch + escape
+  hatches) and uses the typed 0.3 client methods (`commit_paths`, `diff_text`,
+  `rev_list_count`/`commit_count`, `merge_continue`, `is_merge_in_progress`/
+  `is_rebase_in_progress`, `op_head`/`op_restore`, `bookmark_set`/`bookmark_rename`,
+  …) in place of hand-built command strings. Behavior is unchanged; the
+  conflict-sensitive merge/rebase steps deliberately stay raw for editor safety.
 
 ### Fixed
 -

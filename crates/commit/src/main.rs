@@ -8,7 +8,6 @@
 mod ai;
 mod model;
 mod push;
-mod repo;
 mod settings;
 mod tree;
 mod ui;
@@ -65,16 +64,16 @@ async fn run() -> AppResult<ExitCode> {
         Some(dir) => dir.clone(),
         None => std::env::current_dir()?,
     };
-    // Make it absolute so `locate` can walk up parents — a relative path like `.`
+    // Make it absolute so detection can walk up parents — a relative path like `.`
     // or `../x` can't be `pop()`ed past its own components.
     let start = std::path::absolute(&start).unwrap_or(start);
-    let Some(loc) = repo::locate(&start) else {
-        return Err("not inside a git or jj repository".into());
-    };
-    // Operate from the repo root so jj filesets and diff paths are root-relative.
-    std::env::set_current_dir(&loc.root)?;
+    // `Backend::open` detects git/jj at-or-above `start` (via `vcs_core::detect`)
+    // and binds the handle to the repo root.
+    let backend = Backend::open(&start)?;
+    // Operate from the repo root so the raw escape-hatch commands (which run in the
+    // process cwd) and root-relative paths agree.
+    std::env::set_current_dir(backend.root())?;
 
-    let backend = Backend::new(&loc);
     let snapshot = backend.snapshot().await?;
     if snapshot.changes.is_empty() {
         println!("Nothing to commit — no changed tracked files.");

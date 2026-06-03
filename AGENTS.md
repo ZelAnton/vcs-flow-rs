@@ -6,8 +6,10 @@ This file provides guidance to AI coding agents when working with code in this r
 
 `vcs-flow-rs` is a **Cargo workspace of small CLI binaries**, one per `crates/`
 member. Each tool composes a useful *sequence* of version-control operations
-(Git, jj, GitHub CLI) into a single command. The tools are built on the typed
-clients [`vcs-git`](https://crates.io/crates/vcs-git) /
+(Git, jj, GitHub CLI) into a single command. The tools build on the
+[`vcs-core`](https://crates.io/crates/vcs-core) facade (`Repo` detect-and-dispatch
+handle, with `repo.git()`/`repo.jj()` escape hatches) and the typed clients
+[`vcs-git`](https://crates.io/crates/vcs-git) /
 [`vcs-jj`](https://crates.io/crates/vcs-jj) /
 [`vcs-github`](https://crates.io/crates/vcs-github), all of which drive their CLI
 through the job-backed launcher [`processkit`](https://crates.io/crates/processkit)
@@ -32,8 +34,9 @@ Key facts:
 - **TUI tools use ratatui.** The `commit` binary is a full-screen TUI built on
   `ratatui` 0.29 + `tui-tree-widget` 0.23 + `tui-textarea` 0.7 (version-locked —
   see the `[workspace.dependencies]` comment) and `syntect` for diff highlighting.
-  Its modules split cleanly: `repo`/`vcs` (backend + git/jj command sequences via
-  the clients' `run` escape hatch), `tree` (path-compressed tree + tri-state
+  Its modules split cleanly: `vcs` (a `Backend` over `vcs_core::Repo` — facade
+  methods + typed 0.3 client calls via the `repo.git()`/`repo.jj()` escape hatches,
+  with a few raw `run`s where no typed method exists), `tree` (path-compressed tree + tri-state
   selection — pure, unit-tested), `model`, `ai` (Copilot-CLI commit-message
   drafting via `processkit`), `settings` (per-user / per-repo AI model + pull-strategy
   config, TOML), `push` (post-commit push: track → pull-if-behind → push), and
