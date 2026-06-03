@@ -70,8 +70,8 @@ pub async fn generate(diff: &str, existing: &str, model: &str) -> Outcome {
         .await;
 
     // A spawn failure (e.g. copilot not on PATH) is the only `Err`; a timeout
-    // comes back as `Ok` with `timed_out()` set (and a synthetic exit code), so
-    // it must be checked explicitly before the stderr-based classification below.
+    // comes back as `Ok` with `timed_out()` set (and no exit code), so it must be
+    // checked explicitly before the stderr-based classification below.
     let result = match result {
         Ok(r) => r,
         Err(_) => return Outcome::Failed,

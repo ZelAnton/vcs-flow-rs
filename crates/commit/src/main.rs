@@ -158,12 +158,17 @@ async fn interactive(
         return Ok(None);
     }
 
-    let header = message_header(backend.kind(), &target, result.amend);
-    let existing = backend.message_for(&target, result.amend).await?;
+    // Amend needs something to amend into: a jj describe-only target (no bookmark)
+    // has no prior commit, so it's really a normal commit — don't claim "Amend".
+    let amend =
+        result.amend && !(matches!(backend.kind(), BackendKind::Jj) && target.label.is_empty());
+
+    let header = message_header(backend.kind(), &target, amend);
+    let existing = backend.message_for(&target, amend).await?;
     // On amend, keep the prior commit message to tweak. Otherwise draft one with
     // AI from the selected diff (seeded by any existing description), falling back
     // to `existing` if copilot is unavailable, fails, or the user skips.
-    let prefill = if result.amend {
+    let prefill = if amend {
         existing
     } else {
         let diff = selected_diff(snapshot, tree);
@@ -177,7 +182,7 @@ async fn interactive(
     }
     Ok(Some(Plan {
         target,
-        amend: result.amend,
+        amend,
         message,
     }))
 }

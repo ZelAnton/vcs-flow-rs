@@ -211,9 +211,23 @@ impl Backend {
             // Amend needs an existing bookmark commit to fold into; the describe-only
             // target (no bookmark) falls back to a normal commit.
             if amend && !target.label.is_empty() {
-                j.squash_paths(self.cwd(), "@", &target.label, &filesets)
-                    .await?;
-                // Update the commit's description only if the user changed it.
+                // `--use-destination-message` keeps the bookmark commit's own
+                // description so jj never opens an editor to *combine* it with `@`'s
+                // (which `squash_paths`/`jj squash` does when both are described, and
+                // would hang on the now-restored normal terminal). We set the final
+                // message explicitly below.
+                let mut squash = args(&[
+                    "squash",
+                    "--from",
+                    "@",
+                    "--into",
+                    &target.label,
+                    "--use-destination-message",
+                ]);
+                squash.extend(filesets.iter().map(|f| f.as_str().to_string()));
+                j.run(&squash).await?;
+                // Apply the chosen message only if the user changed it (the squash
+                // kept the bookmark's prior message).
                 let current = self.message_for(target, true).await?;
                 if current.trim() != message.trim() {
                     j.run(&args(&["describe", "-r", &target.label, "-m", message]))

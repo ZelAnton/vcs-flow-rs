@@ -55,11 +55,18 @@ fn restore() {
 }
 
 /// Restore the terminal before the default panic handler prints, so the message
-/// isn't swallowed by the alternate screen / mangled by raw mode.
+/// isn't swallowed by the alternate screen / mangled by raw mode. Installed once
+/// per process — `enter()` runs more than once (the push flow re-enters for the
+/// branch picker), and re-wrapping the hook each time would nest it unboundedly
+/// and never restore the original. `restore()` is idempotent and a no-op once the
+/// terminal is back to normal, so leaving the hook installed is harmless.
 fn install_panic_hook() {
-    let original = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore();
-        original(info);
-    }));
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore();
+            original(info);
+        }));
+    });
 }

@@ -47,12 +47,16 @@ impl Highlighter {
                 continue;
             }
 
-            let (sign, bg) = match raw.as_bytes().first() {
-                Some(b'+') => ('+', Some(added_bg)),
-                Some(b'-') => ('-', Some(removed_bg)),
+            // Consume the 1-char diff prefix (space/`+`/`-`). Split by *char*, not
+            // byte, so a content line whose first character is multibyte isn't
+            // dropped (`get(1..)` on a non-boundary byte returns `None`).
+            let mut chars = raw.chars();
+            let (sign, bg) = match chars.next() {
+                Some('+') => ('+', Some(added_bg)),
+                Some('-') => ('-', Some(removed_bg)),
                 _ => (' ', None),
             };
-            let code = raw.get(1..).unwrap_or("");
+            let code = chars.as_str();
 
             // Highlight each line independently: robust against +/- interleaving
             // corrupting a stateful highlighter, and diffs are small.
@@ -97,11 +101,16 @@ fn header_style(line: &str) -> Option<Style> {
                 .add_modifier(Modifier::BOLD),
         );
     }
-    const META: [&str; 8] = [
+    // The `---`/`+++` file markers are anchored to their real forms (`--- a/…`,
+    // `+++ b/…`, `… /dev/null`) so a *removed*/*added* content line whose text
+    // happens to start with `-- `/`++ ` isn't misread as a header.
+    const META: [&str; 10] = [
         "diff --git ",
         "index ",
-        "--- ",
-        "+++ ",
+        "--- a/",
+        "--- /dev/null",
+        "+++ b/",
+        "+++ /dev/null",
         "new file",
         "deleted file",
         "rename ",

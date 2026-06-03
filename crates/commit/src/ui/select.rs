@@ -50,6 +50,9 @@ pub fn run(
     let mut amend = initial_amend;
     let mut diff_cache: HashMap<String, Text<'static>> = HashMap::new();
     let mut detail_scroll: u16 = 0;
+    // Visible line count of the diff pane (inner height), captured each draw so
+    // PageDown can clamp to "last line at the bottom" instead of overscrolling.
+    let mut detail_view_height: u16 = 0;
     let mut last_selected: Option<String> = None;
 
     loop {
@@ -85,6 +88,8 @@ pub fn run(
 
             let cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
                 .split(rows[1]);
+            // Inner height of the bordered diff pane (the visible diff-line count).
+            detail_view_height = cols[1].height.saturating_sub(2);
 
             let widget = Tree::new(&items)
                 .expect("node paths are unique")
@@ -160,8 +165,13 @@ pub fn run(
             KeyCode::Char('-') => tree.set_all(false),
             KeyCode::Char('a') | KeyCode::Char('A') => amend = !amend,
             KeyCode::PageDown => {
-                // Don't scroll past the content into a blank pane.
-                let max = detail.lines.len().saturating_sub(1) as u16;
+                // Clamp so the last line lands at the bottom of the pane rather than
+                // scrolling into a blank gap (and don't truncate huge diffs to u16).
+                let hidden = detail
+                    .lines
+                    .len()
+                    .saturating_sub(detail_view_height as usize);
+                let max = u16::try_from(hidden).unwrap_or(u16::MAX);
                 detail_scroll = detail_scroll.saturating_add(10).min(max);
             }
             KeyCode::PageUp => detail_scroll = detail_scroll.saturating_sub(10),
