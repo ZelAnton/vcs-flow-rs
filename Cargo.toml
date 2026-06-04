@@ -34,18 +34,20 @@ rust-version = "1.88"
 # Job-backed process launcher (Windows Job Object / Linux cgroup) that the VCS
 # clients build on, so a git/jj/gh subprocess tree dies with the tool — no
 # orphans. Also re-exported `Error`/`Result`/`ProcessResult`.
-processkit = "0.5"
+processkit = "0.6"
 # Backend-agnostic VCS facade: repo detection + a cwd-bound `Repo` handle with a
-# common surface and `repo.git()`/`repo.jj()` escape hatches to the typed clients.
-# Depends on (and re-exports) vcs-git/vcs-jj 0.3.
-vcs-core = "0.1"
-# Typed Git CLI client (`Git` / `GitApi`, `DiffSpec`, conflict classifiers). Used
-# directly for the escape-hatch operations the facade doesn't model.
-vcs-git = "0.3"
-# Typed Jujutsu CLI client (`Jj` / `JjApi`, `DiffSpec`, `JjFileset`). Escape-hatch ops.
-vcs-jj = "0.3"
+# common surface, `repo.git_at()`/`repo.jj_at()` bound views, and
+# `repo.git()`/`repo.jj()` escape hatches to the typed clients. Depends on (and
+# re-exports) vcs-git/vcs-jj 0.4.
+vcs-core = "0.2"
+# Typed Git CLI client (`Git` / `GitApi`, `GitAt`, `DiffSpec`, `FileDiff`, conflict
+# classifiers). Used directly for the escape-hatch operations the facade doesn't model.
+vcs-git = "0.4"
+# Typed Jujutsu CLI client (`Jj` / `JjApi`, `JjAt`, `DiffSpec`, `FileDiff`, `JjFileset`,
+# `Bookmark`/`BookmarkRef`). Escape-hatch ops.
+vcs-jj = "0.4"
 # Typed GitHub CLI client (`GitHub` / `GitHubApi`). Drives `gh` through processkit.
-vcs-github = "0.3"
+vcs-github = "0.4"
 # Async runtime: the VCS client traits are `async fn`, so every binary needs an
 # executor (`#[tokio::main]`).
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

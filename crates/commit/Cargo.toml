@@ -21,14 +21,15 @@ path = "src/main.rs"
 
 [dependencies]
 # Backend-agnostic facade: `Repo::open`/`detect` (replaces our own detection +
-# Backend enum) and the common surface (commit_paths, fetch, current_branch, …),
-# with `repo.git()`/`repo.jj()` escape hatches to the typed clients below.
+# Backend enum) and the common surface (current_branch, fetch, …), with the
+# cwd-bound `repo.git_at()`/`repo.jj_at()` typed views for everything else.
 vcs-core.workspace = true
-# Typed jj client (`Jj` / `JjApi`, `DiffSpec`, `JjFileset`) for the escape-hatch
-# operations the facade doesn't model (templates, revsets, bookmarks, op log).
+# Typed jj client (`DiffSpec`, `FileDiff`, `JjFileset`, `Bookmark`/`BookmarkRef`)
+# reached via `repo.jj_at()` for the operations the facade doesn't model
+# (typed diff, reachable bookmarks, resolve list, op log).
 vcs-jj.workspace = true
-# Typed git client (`Git` / `GitApi`, `DiffSpec`, conflict classifiers) for the
-# escape-hatch operations (diff text, merge/rebase, rev-list, refspec push).
+# Typed git client (`DiffSpec`, `FileDiff`, conflict classifiers) reached via
+# `repo.git_at()` for diff, merge/rebase, rev-list, and the refspec push.
 vcs-git.workspace = true
 # Async runtime for the async `JjApi`/`GitApi` traits.
 tokio.workspace = true

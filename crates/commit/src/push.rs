@@ -60,8 +60,15 @@ pub async fn offer(backend: &Backend, target: &crate::model::Target) -> crate::A
     if result.is_success() {
         println!("Pushed '{local}' → origin/{remote_branch}.");
     } else {
-        let stderr = result.stderr().trim();
-        eprintln!("Push failed:\n{stderr}");
+        // `diagnostic()` is stderr, else stdout (git sometimes writes there),
+        // trimmed — so a stderr-silent rejection still reports something.
+        let message = result.diagnostic();
+        let message = if message.is_empty() {
+            "(no output)"
+        } else {
+            message
+        };
+        eprintln!("Push failed:\n{message}");
         if matches!(backend.kind(), crate::model::BackendKind::Git) {
             eprintln!(
                 "(A non-fast-forward rejection after an amend needs a manual force push, \
