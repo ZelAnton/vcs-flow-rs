@@ -245,9 +245,11 @@ impl Backend {
             Ok(g.upstream().await?.as_deref().and_then(parse_git_upstream))
         } else if let Some(j) = self.repo.jj_at() {
             // Tracked iff a remote-tracking entry on `origin` carries this name.
-            let tracked = j.bookmarks_all().await?.into_iter().any(|b| {
-                b.name == name && b.remote.as_deref() == Some(REMOTE) && b.tracked
-            });
+            let tracked = j
+                .bookmarks_all()
+                .await?
+                .into_iter()
+                .any(|b| b.name == name && b.remote.as_deref() == Some(REMOTE) && b.tracked);
             Ok(tracked.then(|| name.to_string()))
         } else {
             unreachable!()
@@ -350,12 +352,17 @@ impl Backend {
     pub async fn behind(&self, name: &str, remote_branch: &str) -> AppResult<bool> {
         if let Some(g) = self.repo.git_at() {
             // Commits reachable from the remote branch but not the local one.
-            match g.rev_list_count(&git_behind_range(name, remote_branch)).await {
+            match g
+                .rev_list_count(&git_behind_range(name, remote_branch))
+                .await
+            {
                 Ok(n) => Ok(n > 0),
                 Err(_) => Ok(false), // the remote ref isn't present locally → not behind
             }
         } else if let Some(j) = self.repo.jj_at() {
-            Ok(j.commit_count(&jj_behind_revset(name, remote_branch)).await? > 0)
+            Ok(j.commit_count(&jj_behind_revset(name, remote_branch))
+                .await?
+                > 0)
         } else {
             unreachable!()
         }

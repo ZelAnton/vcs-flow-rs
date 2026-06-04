@@ -8,7 +8,7 @@ This file provides guidance to AI coding agents when working with code in this r
 member. Each tool composes a useful *sequence* of version-control operations
 (Git, jj, GitHub CLI) into a single command. The tools build on the
 [`vcs-core`](https://crates.io/crates/vcs-core) facade (`Repo` detect-and-dispatch
-handle, with `repo.git()`/`repo.jj()` escape hatches) and the typed clients
+handle, with cwd-bound `repo.git_at()`/`repo.jj_at()` typed views) and the typed clients
 [`vcs-git`](https://crates.io/crates/vcs-git) /
 [`vcs-jj`](https://crates.io/crates/vcs-jj) /
 [`vcs-github`](https://crates.io/crates/vcs-github), all of which drive their CLI
@@ -35,7 +35,7 @@ Key facts:
   `ratatui` 0.29 + `tui-tree-widget` 0.23 + `tui-textarea` 0.7 (version-locked —
   see the `[workspace.dependencies]` comment) and `syntect` for diff highlighting.
   Its modules split cleanly: `vcs` (a `Backend` over `vcs_core::Repo` — facade
-  methods + typed 0.3 client calls via the `repo.git()`/`repo.jj()` escape hatches,
+  methods + typed 0.4 client calls via the cwd-bound `repo.git_at()`/`repo.jj_at()` views,
   with a few raw `run`s where no typed method exists), `tree` (path-compressed tree + tri-state
   selection — pure, unit-tested), `model`, `ai` (Copilot-CLI commit-message
   drafting via `processkit`), `settings` (per-user / per-repo AI model + pull-strategy

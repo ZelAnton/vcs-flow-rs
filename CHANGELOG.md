@@ -40,14 +40,18 @@ to a dated version section.
 
 ### Changed
 - Raised MSRV to 1.88 (required by the `processkit` dependency).
-- Upgraded to `processkit` 0.5 and `vcs-git`/`vcs-jj` 0.3, and adopted the new
-  [`vcs-core`](https://crates.io/crates/vcs-core) facade: `commit`'s `vcs` backend
-  now wraps `vcs_core::Repo` (detection via `vcs_core::detect`, dispatch + escape
-  hatches) and uses the typed 0.3 client methods (`commit_paths`, `diff_text`,
-  `rev_list_count`/`commit_count`, `merge_continue`, `is_merge_in_progress`/
-  `is_rebase_in_progress`, `op_head`/`op_restore`, `bookmark_set`/`bookmark_rename`,
-  …) in place of hand-built command strings. Behavior is unchanged; the
-  conflict-sensitive merge/rebase steps deliberately stay raw for editor safety.
+- Upgraded to `processkit` 0.6, `vcs-core` 0.2, and `vcs-git`/`vcs-jj`/`vcs-github`
+  0.4, and adopted the new toolkit surface: `commit`'s `vcs` backend wraps
+  `vcs_core::Repo` (detection via `vcs_core::detect`) and drives it through the
+  cwd-bound `repo.git_at()`/`repo.jj_at()` typed views. The hand-rolled unified-diff
+  parser is replaced by typed `diff()` → `FileDiff` (inheriting the toolkit's rename
+  and forward-slash path fixes); the jj target/bookmark and git ls-remote/upstream
+  text parsing by typed `reachable_bookmarks`/`bookmarks_all`/`remote_branches`/
+  `upstream`/`resolve_list`; and the git merge/rebase integration by the
+  editor-suppressed typed `merge_commit`/`rebase`/`rebase_continue` (dropping the
+  `-c core.editor=true` workaround). Conflicts are still detected from the index
+  (unmerged entries), and tracking/upstream calls stay best-effort. Behavior is
+  unchanged for the user.
 
 ### Fixed
 -

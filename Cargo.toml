@@ -16,7 +16,7 @@ license = "MIT"
 repository = "https://github.com/ZelAnton/vcs-flow-rs"
 authors = ["Anton Zhelezniakou <github@zelanton.net>"]
 # Minimum Supported Rust Version. 1.88 is the floor our dependencies impose
-# (`processkit` 0.5 requires 1.88); edition 2024 alone only needs 1.85. Raise
+# (`processkit` 0.6 requires 1.88); edition 2024 alone only needs 1.85. Raise
 # this and the `msrv` CI job together when a dependency or language feature
 # needs newer.
 rust-version = "1.88"
