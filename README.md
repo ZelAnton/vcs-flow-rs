@@ -11,14 +11,19 @@ clients [`vcs-git`](https://crates.io/crates/vcs-git),
 [`vcs-github`](https://crates.io/crates/vcs-github), and the job-backed process
 launcher [`processkit`](https://crates.io/crates/processkit).
 
-## Binaries
+## Tools
 
-| Binary | Crate | What it does |
-|---|---|---|
-| `commit` | `vcs-flow-commit` | Interactive TUI: pick changed files (ignoring the index), preview syntax-highlighted diffs, write a message, and commit to git or jj. |
+Each tool lives in its own `crates/<name>` member and has **its own README**
+(linked below) covering usage, keybindings, configuration, and per-backend
+behavior in depth. This page is the index; the crate READMEs are the manuals.
 
-More tools land as their own `crates/<name>` member. All crates share one
-version and release together.
+| Tool | Crate | Docs | What it does |
+|---|---|---|---|
+| `commit` | `vcs-flow-commit` | **[README »](crates/commit/README.md)** | Interactive TUI: pick changed files (ignoring the index), preview syntax-highlighted diffs, write a message (AI-drafted via Copilot), commit to **git** or **jj**, and optionally push. |
+
+More tools land as their own `crates/<name>` member — add a row here and a
+`crates/<name>/README.md` alongside it. All crates share one version and release
+together.
 
 ## Build & run
 

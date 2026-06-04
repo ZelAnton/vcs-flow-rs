@@ -1,12 +1,64 @@
 # commit
 
 An interactive terminal UI for committing. Pick exactly which changed files go
-in (ignoring git's staging area), preview each file's syntax-highlighted diff,
-write the message, and commit — to **git** when the repo is git-only, or to
-**jj** when it's a jj or colocated repo.
+in — ignoring git's staging area entirely — preview each file's
+syntax-highlighted diff, write the message (optionally AI-drafted), and commit:
+to **git** when the repo is git-only, or to **jj** when it's a jj or colocated
+repo. After a fresh commit it can also push for you.
 
 Part of [vcs-flow-rs](https://github.com/ZelAnton/vcs-flow-rs). The crate is
 published as `vcs-flow-commit`; the binary it installs is `commit`.
+
+```text
+ Target: branch feature/login    selected 3/4
+┌ Changes ───────────────────┐┌ src/auth/login.rs ─────────────┐
+│   [~] src/                 ││ @@ -12,7 +12,9 @@ fn sign_in(   │
+│     [~] auth/              ││  use crate::session;           │
+│ »     [x] M login.rs       ││ +use crate::ratelimit;         │
+│       [ ] M session.rs     ││                                │
+│   [x] A README.md          ││ -fn sign_in(u: &User) {        │
+│   [x] R new.rs             ││ +fn sign_in(u: &User, t: Tok) {│
+└────────────────────────────┘└────────────────────────────────┘
+ ↑↓ move  ←→ fold  Space toggle  +/- all/none  a amend  Ctrl+S commit  Esc cancel
+```
+
+## Contents
+
+- [Why](#why)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Usage](#usage)
+- [The interactive flow](#the-interactive-flow)
+  - [1. Choose the target](#1-choose-the-target)
+  - [2. Pick files & preview diffs](#2-pick-files--preview-diffs)
+  - [3. Write the message](#3-write-the-message)
+- [Keybindings](#keybindings)
+- [AI commit messages](#ai-commit-messages)
+- [Configuration](#configuration)
+- [What "commit" means per backend](#what-commit-means-per-backend)
+- [Pushing](#pushing)
+- [Behavior & edge cases](#behavior--edge-cases)
+- [How it's built](#how-its-built)
+- [License](#license)
+
+## Why
+
+Committing a focused changeset usually means staging hunks by hand
+(`git add -p`), squinting at `git diff --cached`, then writing a message — every
+time. `commit` collapses that into one screen: a checkbox tree of changed files
+with live diff previews, message editing, and an optional AI draft, working the
+same way whether the repo is **git** or **jj**. There is no staging step — you
+select files in the UI and `commit` records exactly those.
+
+## Requirements
+
+- A **git** or **jj** repository (run `commit` anywhere inside it; it operates
+  from the repo root). `.jj` present → jj backend (including colocated git+jj);
+  otherwise `.git` → git backend.
+- The matching CLI on `PATH`: `git` and/or `jj`.
+- *Optional* — the [GitHub Copilot CLI] (`copilot`) on `PATH` for AI-drafted
+  messages. Without it, the editor opens on the existing message instead.
+- *Optional* — an `origin` remote, for the post-commit push flow.
 
 ## Install
 
@@ -15,74 +67,174 @@ cargo install vcs-flow-commit       # from crates.io
 cargo install --path crates/commit  # from a checkout
 ```
 
+Both install a binary named `commit` (`commit.exe` on Windows).
+
 ## Usage
 
 Run it inside a repository:
 
 ```bash
 commit            # interactive commit
-commit --amend    # start in amend mode (also toggle with `a`)
+commit --amend    # start in amend mode (also toggle in-app with `a`)
+commit -a         # short form of --amend
 commit -C path    # operate on another repo directory
+commit --help     # full flag list
 ```
 
-You get a file tree of the changed tracked files, path-compressed so deep
-single-child folders collapse (`aa/bb/cc` shown as one node). The right pane
-shows the selected file's diff, or a folder's contents. Everything starts
-selected; uncheck what you don't want. The header shows where the commit will
-land (git branch / jj bookmark).
+`commit` is interactive: if stdin/stdout isn't a terminal it exits with
+`commit is interactive; run it in a terminal`. If there are no changed tracked
+files it prints `Nothing to commit` and exits 0.
 
-### Keys
+## The interactive flow
+
+### 1. Choose the target
+
+Where the commit will land:
+
+- **git** — the current branch (a detached `HEAD` is shown as
+  `detached HEAD @ <short>`).
+- **jj** — the nearest bookmark(s) reachable from `@`. If several are equally
+  near, a picker opens (`↑`/`↓` to move, `Enter` to choose, `Esc` to cancel).
+  If none are near, you can pick any bookmark or
+  *"commit without moving a bookmark"* (describe-only).
+
+When there's only one target the picker is skipped.
+
+### 2. Pick files & preview diffs
+
+A two-pane screen: the changed tracked files on the left, the highlighted diff of
+the selected file on the right (a folder shows its children instead).
+
+- The tree is **path-compressed** — deep single-child folders collapse, so
+  `aa/bb/cc/deep.txt` shows as one `aa/bb/cc` node. It starts fully expanded with
+  everything selected; uncheck what you don't want.
+- **Checkboxes** are tri-state: `[x]` all (green), `[ ]` none (gray),
+  `[~]` partial (yellow, folders only — toggling a folder cascades to its files).
+- **File glyphs** mark the change kind: `A` added (green), `M` modified (yellow),
+  `D` deleted (red), `R` renamed (cyan). A rename commits both the new path and
+  the removal of the old one.
+- The **header** shows the target, an `[AMEND]` badge when amend is on, and the
+  `selected / total` count.
+
+`Ctrl+Enter` / `Ctrl+S` confirms and opens the message editor. Confirming with
+nothing selected is refused (no empty commits).
+
+### 3. Write the message
+
+A multi-line editor, pre-filled:
+
+- On **amend**, with the target commit's current message.
+- Otherwise, with an [AI-drafted message](#ai-commit-messages) (a "Generating…"
+  screen shows while it runs; `Esc` skips to the fallback) — or, if Copilot is
+  unavailable, with the change's current description (jj) or empty (git).
+
+`Ctrl+Enter` / `Ctrl+S` commits; `Esc` cancels. An empty message (after trimming)
+aborts with `empty commit message — nothing committed`.
+
+## Keybindings
+
+**File-selection screen**
 
 | Key | Action |
 |---|---|
-| `↑` `↓` | move | 
-| `←` `→` | collapse / expand a folder |
-| `Space` | toggle the selected file/folder (folders are tri-state) |
-| `+` / `-` | select all / none |
-| `a` | toggle amend |
-| `PgUp` `PgDn` | scroll the diff pane |
-| `Ctrl+Enter` or `Ctrl+S` | confirm → opens the message editor |
-| `Esc` / `q` | cancel |
+| `↑` `↓` | Move the cursor |
+| `←` `→` | Collapse / expand a folder |
+| `Space` | Toggle the selected file/folder (folders cascade, tri-state) |
+| `+` / `-` | Select all / none |
+| `a` | Toggle amend |
+| `PgUp` `PgDn` | Scroll the diff pane (±10 lines, clamped) |
+| `Home` | Jump the diff pane back to the top |
+| `Ctrl+Enter` or `Ctrl+S` | Confirm → message editor |
+| `Esc` / `q` / `Ctrl+C` | Cancel (nothing committed) |
 
-In the message editor, `Ctrl+Enter` / `Ctrl+S` commits and `Esc` cancels. The
-editor is pre-filled with an AI-drafted message: if the [GitHub Copilot CLI]
-(`copilot`) is on `PATH`, the message is generated from the selected diff (plus
-the existing jj change description as context) — a "Generating…" screen shows
-while it runs, and `Esc` skips it. Without copilot (or if it fails) the editor
-falls back to the change's current description (jj) or an empty message (git).
+**Message editor**
 
-### Choosing the AI model
+| Key | Action |
+|---|---|
+| *(typing)* | Edit the multi-line message |
+| `Ctrl+Enter` or `Ctrl+S` | Commit |
+| `Esc` | Cancel |
 
-If copilot reports the configured model is unavailable, `commit` asks you to type
-another model name and retries; the working name is saved back to whichever source
-supplied the failing one (the per-repo file if a repo override was in effect,
-otherwise your user settings) so later runs use it. The model is resolved in this
-order (first wins):
+**Pickers** (bookmark target / remote branch)
 
-1. the `COMMIT_AI_MODEL` environment variable;
-2. a per-repo override file `.vcs-flow-commit.toml` in the repo root
-   (`model = "…"`) — kept out of version control so it is never committed or
-   pushed: a `.git/info/exclude` entry for a colocated git repo, or a `.gitignore`
-   entry for a worktree / pure-jj repo;
-3. the per-user config file (`model = "…"`) at the platform config dir,
-   e.g. `%APPDATA%\vcs-flow\commit.toml` (Windows) or
-   `~/.config/vcs-flow/commit.toml` (Linux);
-4. the built-in default `gpt-5.4-mini`.
-
-[GitHub Copilot CLI]: https://github.com/github/copilot-cli
+| Key | Action |
+|---|---|
+| `↑` `↓` | Move |
+| *(typing)* | Filter the list (remote-branch picker only) |
+| `Enter` | Choose the highlighted entry |
+| `Ctrl+N` | Push as a new same-named branch (remote-branch picker only) |
+| `Esc` | Cancel |
 
 > `Ctrl+Enter` needs a terminal that reports it (most modern ones do); `Ctrl+S`
 > is the universal fallback.
 
+## AI commit messages
+
+For a non-amend commit, `commit` drafts a message from the **selected** diff
+using the [GitHub Copilot CLI]. It runs `copilot` non-interactively (no file or
+tool access — pure text generation), seeded with the existing jj change
+description as context, and asks for an imperative subject (≤72 chars) with an
+optional body. The draft is cleaned of any `Co-authored-by:` trailer before it
+lands in the editor, where you can edit it freely.
+
+It's strictly **best-effort** — a commit is never blocked by the AI:
+
+- A "Generating commit message…" spinner shows while Copilot runs; `Esc` skips it
+  (and kills the subprocess).
+- Generation is capped at 45 s; on timeout, failure, missing CLI, or empty output
+  it silently falls back to the existing description (jj) / empty message (git).
+- The diff sent is capped (~8 KB) so it stays well under the OS command-line
+  limit; the seeded description is capped too.
+
+If Copilot reports the configured **model** is unavailable, `commit` prompts for
+another model name and retries. The working name is saved back to the source that
+supplied the failing one (the per-repo file if a repo override was in effect,
+otherwise your user config) so later runs use it.
+
+## Configuration
+
+Two settings, each resolved **highest-precedence first**; a blank/unrecognized
+value falls through to the next source.
+
+| Setting | Env var | TOML key | Default | Notes |
+|---|---|---|---|---|
+| AI model | `COMMIT_AI_MODEL` | `model` | `gpt-5.4-mini` | Passed to `copilot --model=…` |
+| Pull strategy | `COMMIT_PULL_STRATEGY` | `pull` | `merge` | `merge` or `rebase`; governs **git** integration (jj always rebases) |
+
+**Resolution order** (first match wins):
+
+1. the environment variable;
+2. a **per-repo** override file `.vcs-flow-commit.toml` in the repo root;
+3. the **per-user** config file;
+4. the built-in default.
+
+The per-user file lives at the platform config dir:
+
+- Windows: `%APPDATA%\vcs-flow\commit.toml`
+- Linux: `~/.config/vcs-flow/commit.toml`
+- macOS: `~/Library/Application Support/vcs-flow/commit.toml`
+
+Example file (either location):
+
+```toml
+model = "gpt-5.4"
+pull  = "rebase"
+```
+
+The per-repo `.vcs-flow-commit.toml` is **kept out of version control
+automatically** so it's never committed or pushed: a `.git/info/exclude` entry
+for a colocated git repo, or a `.gitignore` entry for a worktree / pure-jj repo.
+
 ## What "commit" means per backend
 
 - **git** — commits exactly the selected paths' working-tree content to the
-  current branch (`git commit --only`), regardless of what's staged. `--amend`
-  amends the branch tip.
-- **jj** — finalises a commit containing the selected paths and advances the
+  current branch (`git commit --only <paths>`), regardless of what's staged.
+  `--amend` amends the branch tip.
+- **jj** — finalizes a commit containing the selected paths and advances the
   nearest bookmark onto it; deselected changes stay in the working copy. If
-  several bookmarks are equally near, you pick one first. Amend squashes the
-  selected paths into the nearest bookmark's existing commit instead.
+  several bookmarks are equally near, you pick one first. **Amend** squashes the
+  selected paths into the nearest bookmark's existing commit, keeping that
+  commit's description (so jj never opens an editor to merge two messages).
 
 ## Pushing
 
@@ -91,19 +243,48 @@ After a (non-amend) commit, `commit` offers to push to `origin`. On agreement it
 1. **Resolves the remote branch.** If your branch/bookmark already tracks a remote
    branch, it uses that. Otherwise it looks for a **same-named** remote branch and
    tracks it. If there's no match, a **filterable picker** of existing remote
-   branches opens — type to narrow, **Enter** attaches to the highlighted branch,
-   **Ctrl+N** pushes as a new same-named branch, **Esc** cancels.
-2. **Pulls if behind.** It fetches and, if the local branch is behind the remote,
-   integrates the remote commits first. The strategy is **merge** by default; set
-   `pull = "rebase"` in a settings file (or `COMMIT_PULL_STRATEGY=rebase`) to rebase
+   branches opens — type to narrow, `Enter` attaches to the highlighted branch,
+   `Ctrl+N` pushes as a new same-named branch, `Esc` cancels.
+2. **Pulls if behind.** It fetches `origin` and, if the local branch is behind the
+   remote branch, integrates the remote commits first. The strategy is **merge**
+   by default; set `pull = "rebase"` (or `COMMIT_PULL_STRATEGY=rebase`) to rebase
    instead. (The setting governs git; jj always rebases the bookmark onto the
-   remote.) If integration conflicts, `commit` lists the conflicted files and waits
-   — resolve and stage them in your own editor, press Enter, and it re-checks and
-   pushes once clean (or type `a` to abort).
+   remote.) On a **git** repo with uncommitted changes to tracked files it stops
+   instead of risking a half-integration. If integration **conflicts**, `commit`
+   lists the conflicted files and waits — resolve them in your own editor, press
+   `Enter` to re-check and continue, or `a` to abort and roll back.
 3. **Pushes**, setting upstream when the branch was untracked.
 
-Amended commits are not auto-pushed (rewriting an already-pushed tip needs a manual
-force push).
+Amended commits are **not** auto-pushed (rewriting an already-pushed tip needs a
+manual force push, e.g. `git push --force-with-lease`).
+
+## Behavior & edge cases
+
+- **No staging area.** git selection ignores the index entirely; only the files
+  you check are recorded.
+- **Untracked files** aren't shown for git (the diff is against `HEAD`); `git add`
+  them first if you want them in. jj tracks new files automatically, so they
+  appear.
+- **Empty / unborn repo.** With no changed tracked files, `commit` prints
+  `Nothing to commit` and exits without entering the UI.
+- **Renames** show as a single `R old → new` entry and commit both sides.
+- **Non-interactive** invocations (piped stdin/stdout) are refused up front.
+- **Exit codes:** `0` on a successful commit, a clean cancel, or "nothing to
+  commit"; non-zero only on an actual error.
+
+## How it's built
+
+`commit` composes the [vcs-flow-rs](https://github.com/ZelAnton/vcs-flow-rs)
+toolkit: the [`vcs-core`](https://crates.io/crates/vcs-core) facade for
+git/jj detection and dispatch, the typed
+[`vcs-git`](https://crates.io/crates/vcs-git) /
+[`vcs-jj`](https://crates.io/crates/vcs-jj) clients for the backend operations,
+and the job-backed launcher [`processkit`](https://crates.io/crates/processkit)
+(so every `git`/`jj`/`copilot` subprocess tree dies with the tool). The UI is
+built on [`ratatui`](https://crates.io/crates/ratatui) with `syntect` for diff
+highlighting.
+
+[GitHub Copilot CLI]: https://github.com/github/copilot-cli
 
 ## License
 
