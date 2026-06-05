@@ -116,8 +116,14 @@ the selected file on the right (a folder shows its children instead).
 - **Checkboxes** are tri-state: `[x]` all (green), `[ ]` none (gray),
   `[~]` partial (yellow, folders only — toggling a folder cascades to its files).
 - **File glyphs** mark the change kind: `A` added (green), `M` modified (yellow),
-  `D` deleted (red), `R` renamed (cyan). A rename commits both the new path and
-  the removal of the old one.
+  `D` deleted (red), `R` renamed (cyan), `?` untracked (magenta, git only — the
+  preview shows the file's content as added lines). A rename commits both the
+  new path and the removal of the old one.
+- **`/` filters the tree** — type to narrow it to matching paths
+  (case-insensitive substring), `Enter` keeps the filter, `Esc` clears it.
+  Marks on hidden files are untouched, and `+`/`-` only affect what's visible.
+  While a kept filter is active, the first `Esc`/`q` clears it (back to the
+  full tree); a second press cancels the screen.
 - The **header** shows the target, an `[AMEND]` badge when amend is on, and the
   `selected / total` count.
 
@@ -145,7 +151,8 @@ aborts with `empty commit message — nothing committed`.
 | `↑` `↓` | Move the cursor |
 | `←` `→` | Collapse / expand a folder |
 | `Space` | Toggle the selected file/folder (folders cascade, tri-state) |
-| `+` / `-` | Select all / none |
+| `+` / `-` | Select all / none (only the visible files while a filter is active) |
+| `/` | Filter the tree (type to narrow; `Enter` keeps it, `Esc` clears it) |
 | `a` | Toggle amend |
 | `PgUp` `PgDn` | Scroll the diff pane (±10 lines, clamped) |
 | `Home` | Jump the diff pane back to the top |
@@ -209,6 +216,13 @@ another model name and retries. The working name is saved back to the source tha
 supplied the failing one (the per-repo file if a repo override was in effect,
 otherwise your user config) so later runs use it.
 
+With the **Conventional Commits** setting on (`conventional = true` /
+`COMMIT_CONVENTIONAL=1`), the AI is asked to format the subject as
+`type(scope): subject`. If the resulting draft still has no recognized type —
+Copilot unavailable, skipped, or off-format — a quick type picker opens
+(`feat`/`fix`/`docs`/…; `Esc` keeps the message as-is) and the chosen prefix is
+prepended for you to edit.
+
 ## Configuration
 
 Two settings, each resolved **highest-precedence first**; a blank/unrecognized
@@ -218,6 +232,7 @@ value falls through to the next source.
 |---|---|---|---|---|
 | AI model | `COMMIT_AI_MODEL` | `model` | `gpt-5.4-mini` | Passed to `copilot --model=…` |
 | Pull strategy | `COMMIT_PULL_STRATEGY` | `pull` | `merge` | `merge` or `rebase`; governs **git** integration (jj always rebases) |
+| Conventional Commits | `COMMIT_CONVENTIONAL` | `conventional` | `false` | `true`/`false` (env also takes `1`/`0`/`yes`/`no`/`on`/`off`); see [AI commit messages](#ai-commit-messages) |
 
 **Resolution order** (first match wins):
 
@@ -345,9 +360,10 @@ revert fails with nothing changed — commit or stash those edits first.
 
 - **No staging area.** git selection ignores the index entirely; only the files
   you check are recorded.
-- **Untracked files** aren't shown for git (the diff is against `HEAD`); `git add`
-  them first if you want them in. jj tracks new files automatically, so they
-  appear.
+- **Untracked files** show up for git with a `?` glyph (enumerated individually,
+  ignore rules respected) and can be committed like any other file — `commit`
+  stages them with `git add --intent-to-add` first, so `--only` accepts them.
+  jj tracks new files automatically, so they appear as `A` there.
 - **Empty / unborn repo.** With no changed tracked files, `commit` prints
   `Nothing to commit` and exits without entering the UI.
 - **Renames** show as a single `R old → new` entry and commit both sides.

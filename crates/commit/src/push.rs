@@ -172,7 +172,7 @@ async fn integrate_with_pause(
 fn pick_remote(title: &str, remotes: &[String], new_name: &str) -> crate::AppResult<Pick> {
     let (mut tui, _guard) = ui::terminal::TerminalGuard::enter()?;
     let alt = format!("new '{new_name}'");
-    let pick = ui::filter::run(&mut tui, title, remotes, Some(&alt))?;
+    let pick = ui::filter::run(&mut tui, title, "Remote branches", remotes, Some(&alt))?;
     Ok(pick) // guard drops here → terminal restored before we print again
 }
 

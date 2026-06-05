@@ -54,6 +54,10 @@ pub fn run(
     // PageDown can clamp to "last line at the bottom" instead of overscrolling.
     let mut detail_view_height: u16 = 0;
     let mut last_selected: Option<String> = None;
+    // `/` filter over the tree: while `filtering`, typed characters edit the
+    // needle and the view narrows live; marks of hidden files are untouched.
+    let mut filter = String::new();
+    let mut filtering = false;
 
     loop {
         let items = items_of(tree, &tree.roots);
@@ -109,10 +113,16 @@ pub fn run(
                 cols[1],
             );
 
-            frame.render_widget(
-                Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray)),
-                rows[2],
-            );
+            let footer: Paragraph = if filtering {
+                Paragraph::new(format!("filter: {filter}_   Enter keep   Esc clear"))
+                    .style(Style::default().fg(Color::Yellow))
+            } else if !filter.is_empty() {
+                Paragraph::new(format!("{FOOTER}  [filter: {filter}]"))
+                    .style(Style::default().fg(Color::DarkGray))
+            } else {
+                Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray))
+            };
+            frame.render_widget(footer, rows[2]);
         })?;
 
         let Event::Key(key) = event::read()? else {
@@ -131,6 +141,41 @@ pub fn run(
             continue; // refuse an empty commit
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if filtering {
+            // Modal filter input: printable keys edit the needle (so `q`/`a`/
+            // Space lose their command meaning until Enter); navigation and the
+            // confirm chord stay live.
+            match key.code {
+                KeyCode::Char('c') if ctrl => {
+                    return Ok(SelectResult {
+                        confirmed: false,
+                        amend,
+                    });
+                }
+                KeyCode::Esc => {
+                    filtering = false;
+                    filter.clear();
+                    apply_filter(tree, snapshot, &filter, &mut state);
+                }
+                KeyCode::Enter => filtering = false,
+                KeyCode::Backspace => {
+                    filter.pop();
+                    apply_filter(tree, snapshot, &filter, &mut state);
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    filter.push(c);
+                    apply_filter(tree, snapshot, &filter, &mut state);
+                }
+                KeyCode::Up => {
+                    state.key_up();
+                }
+                KeyCode::Down => {
+                    state.key_down();
+                }
+                _ => {}
+            }
+            continue;
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 return Ok(SelectResult {
@@ -139,11 +184,20 @@ pub fn run(
                 });
             }
             KeyCode::Esc | KeyCode::Char('q') => {
+                // With a filter active, cancel first widens back to the full
+                // tree (same for Esc and q — no surprise aborts); a second
+                // press cancels the screen.
+                if !filter.is_empty() {
+                    filter.clear();
+                    apply_filter(tree, snapshot, &filter, &mut state);
+                    continue;
+                }
                 return Ok(SelectResult {
                     confirmed: false,
                     amend,
                 });
             }
+            KeyCode::Char('/') => filtering = true,
             KeyCode::Up => {
                 state.key_up();
             }
@@ -161,8 +215,8 @@ pub fn run(
                     tree.toggle(&id.clone());
                 }
             }
-            KeyCode::Char('+') => tree.set_all(true),
-            KeyCode::Char('-') => tree.set_all(false),
+            KeyCode::Char('+') => tree.set_view(true),
+            KeyCode::Char('-') => tree.set_view(false),
             KeyCode::Char('a') | KeyCode::Char('A') => amend = !amend,
             KeyCode::PageDown => {
                 // Clamp so the last line lands at the bottom of the pane rather than
@@ -181,7 +235,34 @@ pub fn run(
     }
 }
 
-const FOOTER: &str = "↑↓ move  ←→ fold  Space toggle  +/- all/none  a amend  PgUp/PgDn scroll  Ctrl+Enter/Ctrl+S commit  Esc cancel";
+const FOOTER: &str = "↑↓ move  ←→ fold  Space toggle  +/- all/none  / filter  a amend  PgUp/PgDn scroll  Ctrl+Enter/Ctrl+S commit  Esc cancel";
+
+/// Narrow the visible tree to the files whose path matches `filter`
+/// (case-insensitive substring; empty matches all) and reset the cursor/fold
+/// state for the rebuilt forest. Marks are per original index and survive.
+fn apply_filter(
+    tree: &mut TreeModel,
+    snapshot: &Snapshot,
+    filter: &str,
+    state: &mut TreeState<String>,
+) {
+    let keep: Vec<usize> = snapshot
+        .changes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| crate::ui::filter::matches(&c.path, filter))
+        .map(|(i, _)| i)
+        .collect();
+    tree.rebuild_view(&snapshot.changes, &keep);
+    for chain in open_chains(&tree.roots) {
+        state.open(chain);
+    }
+    if let Some(first) = tree.roots.first() {
+        state.select(vec![first.id()]);
+    } else {
+        state.select(Vec::new());
+    }
+}
 
 /// Header showing where the commit will land plus the amend flag and counts.
 fn header_line(
@@ -274,6 +355,7 @@ fn glyph_style(kind: ChangeKind) -> (char, Color) {
         ChangeKind::Modified => ('M', Color::Yellow),
         ChangeKind::Deleted => ('D', Color::Red),
         ChangeKind::Renamed => ('R', Color::Cyan),
+        ChangeKind::Untracked => ('?', Color::Magenta),
     }
 }
 

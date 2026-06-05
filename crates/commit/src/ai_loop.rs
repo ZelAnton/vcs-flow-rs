@@ -14,8 +14,13 @@ use crate::{AppResult, ai, settings, ui};
 
 /// What to draft — selects the `ai` entry point (and its prompt) per attempt.
 pub enum Draft<'a> {
-    /// A commit message from the selected diff, seeded with the existing description.
-    Commit { diff: &'a str, existing: &'a str },
+    /// A commit message from the selected diff, seeded with the existing
+    /// description; `conventional` asks for Conventional Commits formatting.
+    Commit {
+        diff: &'a str,
+        existing: &'a str,
+        conventional: bool,
+    },
     /// A PR title (first line) + markdown body from the branch-vs-base diff.
     Pr { diff: &'a str },
 }
@@ -23,7 +28,11 @@ pub enum Draft<'a> {
 impl Draft<'_> {
     async fn attempt(&self, model: &str) -> ai::Outcome {
         match self {
-            Draft::Commit { diff, existing } => ai::generate(diff, existing, model).await,
+            Draft::Commit {
+                diff,
+                existing,
+                conventional,
+            } => ai::generate(diff, existing, model, *conventional).await,
             Draft::Pr { diff } => ai::generate_pr(diff, model).await,
         }
     }

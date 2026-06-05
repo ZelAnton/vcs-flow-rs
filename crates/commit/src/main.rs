@@ -176,18 +176,35 @@ async fn interactive(
         // The repo root is the process CWD (set in `run` so jj filesets resolve),
         // which `settings` uses for the per-repo override file.
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let conventional = settings::conventional(&root);
         let diff = selected_diff(snapshot, tree);
-        ai_loop::draft_with_retry(
+        let mut draft = ai_loop::draft_with_retry(
             tui,
             &root,
             ai_loop::Draft::Commit {
                 diff: &diff,
                 existing: &existing,
+                conventional,
             },
             "Generating commit message…",
             &existing,
         )
-        .await?
+        .await?;
+        // Conventional Commits, but the draft has no type (AI unavailable,
+        // skipped, or off-format): offer the type picker; Esc keeps it plain.
+        if conventional && !has_conventional_prefix(&draft) {
+            let types: Vec<String> = CC_TYPES.iter().map(|s| (*s).to_string()).collect();
+            if let ui::filter::Pick::Existing(t) = ui::filter::run(
+                tui,
+                "Conventional Commit type (Esc — none):",
+                "Types",
+                &types,
+                None,
+            )? {
+                draft = format!("{t}: {draft}");
+            }
+        }
+        draft
     };
     let Some(message) = ui::editor::run(tui, &prefill, &header)? else {
         return Ok(None);
@@ -219,6 +236,24 @@ fn selected_diff(snapshot: &Snapshot, tree: &TreeModel) -> String {
         .join("\n")
 }
 
+/// The Conventional Commits types offered by the picker (and recognised by
+/// [`has_conventional_prefix`]).
+const CC_TYPES: &[&str] = &[
+    "feat", "fix", "docs", "refactor", "test", "chore", "build", "ci", "perf", "style", "revert",
+];
+
+/// Whether the first line already looks like a Conventional Commit
+/// (`type(optional-scope)!?: …` with a known type).
+fn has_conventional_prefix(message: &str) -> bool {
+    let first = message.lines().next().unwrap_or("");
+    let Some((head, _)) = first.split_once(':') else {
+        return false;
+    };
+    let head = head.trim_end_matches('!');
+    let head = head.split('(').next().unwrap_or(head);
+    CC_TYPES.contains(&head)
+}
+
 fn where_to(kind: BackendKind, target: &Target) -> String {
     if target.label.is_empty() {
         return "working-copy change".to_string();
@@ -241,4 +276,21 @@ fn success_line(kind: BackendKind, plan: &Plan, count: usize) -> String {
         "{action} {count} {noun} to {}.",
         where_to(kind, &plan.target)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_conventional_prefixes() {
+        assert!(has_conventional_prefix("feat: add picker"));
+        assert!(has_conventional_prefix("fix(ui): clamp scroll\n\nbody"));
+        assert!(has_conventional_prefix("refactor!: drop old API"));
+        assert!(has_conventional_prefix("chore(deps)!: bump toolkit"));
+        assert!(!has_conventional_prefix("Add picker"));
+        assert!(!has_conventional_prefix("feature: not a known type"));
+        assert!(!has_conventional_prefix("feat add picker")); // no colon
+        assert!(!has_conventional_prefix(""));
+    }
 }

@@ -1,9 +1,11 @@
-//! A filterable list picker over remote branch names. Type to narrow the list.
+//! A filterable list picker (remote branches in the push/PR flows, Conventional
+//! Commit types in the message flow — the caller names the list). Type to
+//! narrow the list.
 //!
-//! `Enter` picks the highlighted branch, `Esc` cancels. An optional alternate
+//! `Enter` picks the highlighted entry, `Esc` cancels. An optional alternate
 //! action on `Ctrl+N` (e.g. "push as a new same-named branch" in the push flow)
-//! is offered only when the caller provides its hint text; the PR base picker
-//! passes `None` and gets a plain pick/cancel dialog.
+//! is offered only when the caller provides its hint text; other callers pass
+//! `None` and get a plain pick/cancel dialog.
 
 use std::io;
 
@@ -25,13 +27,15 @@ pub enum Pick {
 }
 
 /// Case-insensitive substring match (the filter rule). Empty filter matches all.
-fn matches(item: &str, filter: &str) -> bool {
+/// (`pub(crate)`: the file-select screen's `/` filter uses the same rule.)
+pub(crate) fn matches(item: &str, filter: &str) -> bool {
     filter.is_empty() || item.to_lowercase().contains(&filter.to_lowercase())
 }
 
 pub fn run(
     tui: &mut Tui,
     title: &str,
+    list_title: &str,
     items: &[String],
     alt_action: Option<&str>,
 ) -> io::Result<Pick> {
@@ -74,7 +78,7 @@ pub fn run(
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Remote branches "),
+                        .title(format!(" {list_title} ")),
                 )
                 .highlight_style(
                     Style::default()

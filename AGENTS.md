@@ -41,7 +41,8 @@ Key facts:
   `tree` (path-compressed tree + tri-state selection — pure, unit-tested), `model`,
   `ai` (Copilot-CLI drafting via `processkit`: commit messages and PR title+body),
   `ai_loop` (the shared spinner + model-retry loop both drafts use), `settings`
-  (per-user / per-repo AI model + pull-strategy config, TOML), `push` (post-commit
+  (per-user / per-repo AI model + pull-strategy + Conventional-Commits config,
+  TOML), `push` (post-commit
   push: track → pull-if-behind → push), `pr` (post-push GitHub PR step via
   `vcs-github`/`gh`: list open PRs with OSC 8 links, or offer to create one —
   AI-drafted, edited, opened in the browser with `gh pr create --web` — with a

@@ -42,6 +42,13 @@ to a dated version section.
   checkbox tree with per-file diffs, and can bulk-revert the marked files in the
   working copy — the undone patch is backed up to `%TEMP%/vcs-flow-commit/`
   first, and the pushed branch itself is never rewritten.
+- `commit`: file-selection upgrades — `/` filters the tree live (marks on hidden
+  files survive; `+`/`-` touch only the visible files); git **untracked** files
+  appear with a `?` glyph (individually, ignore rules respected), preview as
+  added lines, and commit via an automatic `git add --intent-to-add`; a
+  **Conventional Commits** setting (`conventional` / `COMMIT_CONVENTIONAL`)
+  steers the AI draft to `type(scope): subject` and falls back to a type picker
+  when the draft has no recognized type.
 - `commit`: model selection with persistence. When copilot reports the configured
   model is unavailable, the TUI prompts for another name and saves the working one
   back to the source it came from (the per-repo file, else the per-user file). The

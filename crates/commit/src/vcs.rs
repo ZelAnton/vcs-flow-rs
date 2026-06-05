@@ -87,18 +87,55 @@ impl Backend {
         }
     }
 
-    /// Collect the changed tracked files (ignoring the index) and their diffs.
+    /// Collect the changed files (ignoring the index) and their diffs: tracked
+    /// changes for both backends, plus — git only — untracked files with a
+    /// synthesized all-added preview (jj auto-tracks new files, so they already
+    /// arrive as `Added` through the diff).
     pub async fn snapshot(&self) -> AppResult<Snapshot> {
         if let Some(g) = self.repo.git_at() {
             // Typed `diff(WorkingTree)` is `diff HEAD … -M`, parsed per file. It
             // diffs the empty tree on an unborn repo, so no special-case is needed.
-            Ok(snapshot_from_git(g.diff(GitDiff::WorkingTree).await?))
+            let mut snap = snapshot_from_git(g.diff(GitDiff::WorkingTree).await?);
+            // The diff can't see files git doesn't know yet — list them
+            // separately (git applies the ignore rules, `-uall` enumerates
+            // files inside untracked directories individually).
+            for path in self.git_untracked().await? {
+                snap.diffs.insert(
+                    path.clone(),
+                    untracked_preview(&self.repo.root().join(&path)),
+                );
+                snap.changes.push(FileChange {
+                    path,
+                    old_path: None,
+                    kind: ChangeKind::Untracked,
+                });
+            }
+            Ok(snap)
         } else if let Some(j) = self.repo.jj_at() {
             // jj `diff(WorkingTree)` is `diff -r @ --git`, parsed per file.
             Ok(snapshot_from_jj(j.diff(JjDiff::WorkingTree).await?))
         } else {
             unreachable!()
         }
+    }
+
+    /// git-only: the untracked files, one entry per file (`-uall`), repo-relative
+    /// with raw (unquoted) paths thanks to `-z`. Empty for jj.
+    async fn git_untracked(&self) -> AppResult<Vec<String>> {
+        let Some(g) = self.repo.git_at() else {
+            return Ok(Vec::new());
+        };
+        // No typed equivalent: `status()` aggregates an untracked directory as
+        // one `?? dir/` record, but the tree needs the individual files.
+        let out = g
+            .run(&args(&[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ]))
+            .await?;
+        Ok(parse_untracked_z(&out))
     }
 
     /// Where the commit can land. git: the current branch (one). jj: the nearest
@@ -196,8 +233,33 @@ impl Backend {
         target: &Target,
     ) -> AppResult<()> {
         if let Some(g) = self.repo.git_at() {
-            let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-            g.commit_paths(&paths, message, amend).await?;
+            // `commit --only` accepts a pathspec only for paths git knows;
+            // selected *untracked* files must enter the index as intent-to-add
+            // first (`-N` stages the path, not the content — `--only` then
+            // commits the working-tree content like for every other file).
+            let untracked: std::collections::HashSet<String> =
+                self.git_untracked().await?.into_iter().collect();
+            let to_add: Vec<String> = paths
+                .iter()
+                .filter(|p| untracked.contains(p.as_str()))
+                .cloned()
+                .collect();
+            if !to_add.is_empty() {
+                let mut a = args(&["add", "--intent-to-add", "--"]);
+                a.extend(to_add.iter().cloned());
+                g.run(&a).await?;
+            }
+            let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+            let res = g.commit_paths(&path_bufs, message, amend).await;
+            if res.is_err() && !to_add.is_empty() {
+                // Best-effort: a failed commit (hook rejection, …) mustn't leave
+                // intent-to-add index entries the user never created. (`reset`
+                // needs a born HEAD; on the unborn edge the entries just stay.)
+                let mut r = args(&["reset", "-q", "--"]);
+                r.extend(to_add);
+                let _ = g.run(&r).await;
+            }
+            res?;
         } else if let Some(j) = self.repo.jj_at() {
             let filesets: Vec<JjFileset> = paths.iter().map(JjFileset::path).collect();
             // Amend needs an existing bookmark commit to fold into; the describe-only
@@ -697,6 +759,44 @@ fn review_spec(base: &str, head: &str) -> String {
     format!("{REMOTE}/{base}...{REMOTE}/{head}")
 }
 
+/// The untracked (`?? `) paths from `status --porcelain=v1 -z` output. `-z`
+/// records are NUL-delimited with raw, unquoted paths; non-`??` records (and a
+/// rename's trailing source-path record) simply don't carry the prefix.
+fn parse_untracked_z(out: &str) -> Vec<String> {
+    out.split('\0')
+        .filter_map(|rec| rec.strip_prefix("?? "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Synthesized diff-pane preview for an untracked file: its content as added
+/// (`+`) lines, capped, with binary and unreadable files reduced to a notice.
+/// Display-only — the commit path never applies this text anywhere.
+fn untracked_preview(full_path: &Path) -> String {
+    const CAP: usize = 200_000; // plenty for a preview, far below pane limits
+    let Ok(bytes) = std::fs::read(full_path) else {
+        return "(unreadable file)".to_string();
+    };
+    if bytes.iter().take(8192).any(|&b| b == 0) {
+        return "(binary file — content not shown)".to_string();
+    }
+    let truncated = bytes.len() > CAP;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(CAP)]);
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.lines() {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    if truncated {
+        out.push_str("... (truncated)\n");
+    }
+    if out.is_empty() {
+        out.push_str("(empty file)\n");
+    }
+    out
+}
+
 /// Backup-file stamp: epoch milliseconds plus a per-process counter, so two
 /// reverts landing in the same millisecond can't overwrite each other's backup.
 fn backup_stamp() -> String {
@@ -789,6 +889,32 @@ mod tests {
         assert_eq!(git_behind_range("feat", "main"), "feat..origin/main");
         // jj: remote-only commits relative to the local bookmark's ancestry.
         assert_eq!(jj_behind_revset("feat", "main"), "main@origin ~ ::feat");
+    }
+
+    #[test]
+    fn parses_untracked_from_porcelain_z() {
+        // Mixed records: modified, untracked (incl. a space in the path),
+        // rename + its trailing source record (no `?? ` prefix → skipped).
+        let out = " M src/lib.rs\0?? new file.txt\0?? dir/inner.rs\0R  new.rs\0old.rs\0";
+        assert_eq!(parse_untracked_z(out), vec!["new file.txt", "dir/inner.rs"]);
+        assert!(parse_untracked_z("").is_empty());
+    }
+
+    #[test]
+    fn untracked_preview_marks_lines_and_classifies() {
+        let dir = std::env::temp_dir().join(format!("vcs-flow-test-{}", backup_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("t.txt");
+        std::fs::write(&text, "alpha\nbeta\n").unwrap();
+        assert_eq!(untracked_preview(&text), "+alpha\n+beta\n");
+        let bin = dir.join("b.bin");
+        std::fs::write(&bin, b"\x00\x01\x02").unwrap();
+        assert!(untracked_preview(&bin).contains("binary"));
+        let empty = dir.join("e.txt");
+        std::fs::write(&empty, "").unwrap();
+        assert!(untracked_preview(&empty).contains("empty"));
+        assert!(untracked_preview(&dir.join("missing")).contains("unreadable"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

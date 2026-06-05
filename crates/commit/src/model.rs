@@ -8,6 +8,10 @@ pub enum ChangeKind {
     Modified,
     Deleted,
     Renamed,
+    /// git only: a file git doesn't know yet (jj auto-tracks new files, so they
+    /// arrive as [`Added`](ChangeKind::Added) there). Committing one requires an
+    /// `add --intent-to-add` first — see `Backend::commit`.
+    Untracked,
 }
 
 /// A single changed file, with its path relative to the repository root and

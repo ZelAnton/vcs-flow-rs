@@ -69,10 +69,33 @@ pub struct TreeModel {
 impl TreeModel {
     /// Build the compressed tree from the change list. All files start selected.
     pub fn build(changes: &[FileChange]) -> Self {
-        let mut indexed: Vec<(Vec<&str>, usize)> = changes
+        let mut model = TreeModel {
+            roots: Vec::new(),
+            selected: vec![true; changes.len()],
+        };
+        let all: Vec<usize> = (0..changes.len()).collect();
+        model.rebuild_view(changes, &all);
+        model
+    }
+
+    /// Rebuild the visible forest from the subset of `changes` whose original
+    /// indices are in `keep`, leaving the selection state untouched. File nodes
+    /// keep their *original* change indices, so marks survive any narrowing —
+    /// this is what the select screen's filter uses (pass every index to
+    /// restore the full view).
+    pub fn rebuild_view(&mut self, changes: &[FileChange], keep: &[usize]) {
+        let mut indexed: Vec<(Vec<&str>, usize)> = keep
             .iter()
-            .enumerate()
-            .map(|(i, c)| (c.path.split('/').filter(|s| !s.is_empty()).collect(), i))
+            .map(|&i| {
+                (
+                    changes[i]
+                        .path
+                        .split('/')
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                    i,
+                )
+            })
             .collect();
         indexed.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -80,10 +103,7 @@ impl TreeModel {
         for node in &mut roots {
             compress(node);
         }
-        TreeModel {
-            roots,
-            selected: vec![true; changes.len()],
-        }
+        self.roots = roots;
     }
 
     /// Selection status of a node from its descendant files.
@@ -118,6 +138,17 @@ impl TreeModel {
     pub fn set_all(&mut self, value: bool) {
         for s in &mut self.selected {
             *s = value;
+        }
+    }
+
+    /// Select (`true`) or clear (`false`) only the files in the current view —
+    /// with a filter active, `+`/`-` shouldn't reach what the user can't see.
+    /// Identical to [`set_all`](Self::set_all) when the view is unfiltered.
+    pub fn set_view(&mut self, value: bool) {
+        let mut files = Vec::new();
+        collect_files(&self.roots, &mut files);
+        for i in files {
+            self.selected[i] = value;
         }
     }
 
@@ -336,6 +367,34 @@ mod tests {
         let mut paths = t.selected_paths(&c);
         paths.sort();
         assert_eq!(paths, vec!["new.rs".to_string(), "old.rs".to_string()]);
+    }
+
+    #[test]
+    fn rebuild_view_keeps_original_indices_and_marks() {
+        let c = changes(&["src/a.rs", "src/b.rs", "docs/x.md"]);
+        let mut t = TreeModel::build(&c);
+        // Clear b.rs, then narrow the view to docs/ only.
+        t.toggle("src/b.rs");
+        t.rebuild_view(&c, &[2]);
+        // The view shows only docs/x.md, carrying its ORIGINAL index (2).
+        assert_eq!(t.roots.len(), 1);
+        let file = &t.roots[0].children[0];
+        assert!(matches!(file.kind, NodeKind::File { index: 2, .. }));
+        // Marks of hidden files survive: a.rs still on, b.rs still off.
+        t.rebuild_view(&c, &[0, 1, 2]);
+        let paths = t.selected_paths(&c);
+        assert_eq!(paths, vec!["src/a.rs".to_string(), "docs/x.md".to_string()]);
+    }
+
+    #[test]
+    fn set_view_only_touches_visible_files() {
+        let c = changes(&["src/a.rs", "src/b.rs", "docs/x.md"]);
+        let mut t = TreeModel::build(&c);
+        t.rebuild_view(&c, &[0, 1]); // filter to src/
+        t.set_view(false); // "- none" under the filter
+        t.rebuild_view(&c, &[0, 1, 2]); // back to full view
+        // docs/x.md was invisible and keeps its mark.
+        assert_eq!(t.selected_paths(&c), vec!["docs/x.md".to_string()]);
     }
 
     #[test]

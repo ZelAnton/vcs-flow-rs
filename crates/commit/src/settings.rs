@@ -25,6 +25,9 @@ const MODEL_ENV: &str = "COMMIT_AI_MODEL";
 /// Env var overriding the pull strategy.
 const PULL_ENV: &str = "COMMIT_PULL_STRATEGY";
 
+/// Env var overriding the Conventional Commits setting.
+const CONVENTIONAL_ENV: &str = "COMMIT_CONVENTIONAL";
+
 /// Per-repo override file name (lives in the repo root, version-control-excluded).
 const REPO_FILE: &str = ".vcs-flow-commit.toml";
 
@@ -58,6 +61,9 @@ pub struct Settings {
     /// Pull strategy (`"merge"` / `"rebase"`). `None` → fall through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull: Option<String>,
+    /// Conventional Commits messages (`true` / `false`). `None` → fall through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventional: Option<bool>,
 }
 
 /// The user-level config path (`<config_dir>/vcs-flow/commit.toml`), or `None`
@@ -147,6 +153,27 @@ fn parse_pull(s: &str) -> Option<PullStrategy> {
     match s.trim().to_ascii_lowercase().as_str() {
         "merge" => Some(PullStrategy::Merge),
         "rebase" => Some(PullStrategy::Rebase),
+        _ => None,
+    }
+}
+
+/// Whether commit messages should follow Conventional Commits for `root`:
+/// `COMMIT_CONVENTIONAL` env → repo file → user file → `false`. Unrecognised
+/// values fall through.
+pub fn conventional(root: &Path) -> bool {
+    let env = std::env::var(CONVENTIONAL_ENV)
+        .ok()
+        .and_then(|s| parse_bool(&s));
+    let repo = read(&repo_path(root)).conventional;
+    let user = user_path().map(|p| read(&p)).and_then(|s| s.conventional);
+    env.or(repo).or(user).unwrap_or(false)
+}
+
+/// Parse a boolean-ish env value; `None` for blank/unrecognised (falls through).
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
 }
@@ -288,6 +315,18 @@ mod tests {
         );
         assert_eq!(parse_pull(" Rebase "), Some(PullStrategy::Rebase));
         assert_eq!(parse_pull("squash"), None);
+    }
+
+    #[test]
+    fn parse_bool_accepts_common_forms_and_rejects_garbage() {
+        for s in ["1", "true", "YES", " on "] {
+            assert_eq!(parse_bool(s), Some(true), "{s}");
+        }
+        for s in ["0", "False", "no", "OFF"] {
+            assert_eq!(parse_bool(s), Some(false), "{s}");
+        }
+        assert_eq!(parse_bool(""), None);
+        assert_eq!(parse_bool("maybe"), None);
     }
 
     #[test]

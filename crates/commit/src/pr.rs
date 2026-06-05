@@ -203,7 +203,7 @@ async fn pick_base(backend: &Backend, head: &str, current: &str) -> AppResult<Op
     }
     let title = format!("Choose the PR base branch (current: {current}):");
     let (mut tui, _guard) = ui::terminal::TerminalGuard::enter()?;
-    match ui::filter::run(&mut tui, &title, &branches, None)? {
+    match ui::filter::run(&mut tui, &title, "Remote branches", &branches, None)? {
         Pick::Existing(b) => Ok(Some(b)),
         _ => Ok(None), // Esc (NewBranch is disabled) → keep the current base
     }

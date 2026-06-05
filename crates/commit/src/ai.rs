@@ -46,6 +46,11 @@ First line: imperative mood, max 72 chars.
 If more context is needed, add a body after a blank line.
 Output ONLY the raw commit message text. No markdown, no quotes, no prefixes.";
 
+/// Appended to the commit preamble when the Conventional Commits setting is on.
+const CONVENTIONAL_HINT: &str = "\nFormat the first line as a Conventional Commit: \
+`type(optional-scope): subject`, with type one of feat, fix, docs, style, refactor, \
+perf, test, build, ci, chore, revert.";
+
 /// The instruction block for a PR title + description. Unlike the commit
 /// preamble it *invites* markdown — that's what the PR body renders as.
 const PR_PROMPT_PREAMBLE: &str = "\
@@ -57,8 +62,9 @@ Output ONLY the title and the description. Do not wrap the answer in code fences
 
 /// Draft a commit message from `diff` with `model`, optionally seeded with the
 /// `existing` description (the jj `@` change description) as context.
-pub async fn generate(diff: &str, existing: &str, model: &str) -> Outcome {
-    run_copilot(&build_commit_prompt(diff, existing), model).await
+/// `conventional` asks for Conventional Commits formatting.
+pub async fn generate(diff: &str, existing: &str, model: &str, conventional: bool) -> Outcome {
+    run_copilot(&build_commit_prompt(diff, existing, conventional), model).await
 }
 
 /// Draft a PR title (first line) + markdown body from the branch-vs-base `diff`.
@@ -119,10 +125,14 @@ fn is_model_unavailable(stderr: &str) -> bool {
     lower.contains("model") && lower.contains("not available")
 }
 
-/// Assemble the commit-message prompt: preamble, the existing description as
-/// context (when present), then the (truncated) diff.
-fn build_commit_prompt(diff: &str, existing: &str) -> String {
+/// Assemble the commit-message prompt: preamble (+ the Conventional Commits
+/// instruction when asked), the existing description as context (when present),
+/// then the (truncated) diff.
+fn build_commit_prompt(diff: &str, existing: &str, conventional: bool) -> String {
     let mut prompt = String::from(PROMPT_PREAMBLE);
+    if conventional {
+        prompt.push_str(CONVENTIONAL_HINT);
+    }
     let existing = existing.trim();
     if !existing.is_empty() {
         prompt.push_str(
@@ -176,17 +186,25 @@ mod tests {
 
     #[test]
     fn prompt_includes_existing_description_as_context() {
-        let p = build_commit_prompt("diff body", "  WIP: refactor parser  ");
+        let p = build_commit_prompt("diff body", "  WIP: refactor parser  ", false);
         assert!(p.starts_with(PROMPT_PREAMBLE));
         assert!(p.contains("Current draft description"));
         assert!(p.contains("WIP: refactor parser"));
         assert!(p.trim_end().ends_with("diff body"));
+        assert!(!p.contains("Conventional Commit"));
     }
 
     #[test]
     fn prompt_omits_description_block_when_empty() {
-        let p = build_commit_prompt("diff body", "   ");
+        let p = build_commit_prompt("diff body", "   ", false);
         assert!(!p.contains("Current draft description"));
+        assert!(p.ends_with("diff body"));
+    }
+
+    #[test]
+    fn prompt_adds_conventional_instruction_when_asked() {
+        let p = build_commit_prompt("diff body", "", true);
+        assert!(p.contains("Conventional Commit"));
         assert!(p.ends_with("diff body"));
     }
 
@@ -250,7 +268,8 @@ mod tests {
             --- a/greet.rs\n+++ b/greet.rs\n@@ -1 +1 @@\n\
             -fn greet() { println!(\"hi\"); }\n\
             +fn greet(name: &str) { println!(\"hi {name}\"); }\n";
-        let Outcome::Drafted(msg) = generate(diff, "", crate::settings::DEFAULT_MODEL).await else {
+        let Outcome::Drafted(msg) = generate(diff, "", crate::settings::DEFAULT_MODEL, false).await
+        else {
             panic!("copilot did not draft a message");
         };
         assert!(!msg.trim().is_empty());
