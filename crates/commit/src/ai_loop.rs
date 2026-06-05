@@ -21,8 +21,12 @@ pub enum Draft<'a> {
         existing: &'a str,
         conventional: bool,
     },
-    /// A PR title (first line) + markdown body from the branch-vs-base diff.
-    Pr { diff: &'a str },
+    /// A PR title (first line) + markdown body from the branch-vs-base diff,
+    /// filling in the repo's PR template when one exists.
+    Pr {
+        diff: &'a str,
+        template: Option<&'a str>,
+    },
 }
 
 impl Draft<'_> {
@@ -33,7 +37,7 @@ impl Draft<'_> {
                 existing,
                 conventional,
             } => ai::generate(diff, existing, model, *conventional).await,
-            Draft::Pr { diff } => ai::generate_pr(diff, model).await,
+            Draft::Pr { diff, template } => ai::generate_pr(diff, model, *template).await,
         }
     }
 }

@@ -38,7 +38,9 @@ Key facts:
   methods + typed 0.4 client calls via the cwd-bound `repo.git_at()`/`repo.jj_at()` views,
   with a few raw `run`s where no typed method exists, plus the git-only branch-vs-base
   review/revert that uses a standalone `vcs_git::Git` for a jj repo's colocated `.git`),
-  `tree` (path-compressed tree + tri-state selection — pure, unit-tested), `model`,
+  `tree` (path-compressed tree + tri-state file/hunk selection — pure, unit-tested),
+  `patch` (byte-level unified-diff split/assembly for the hunk-subset commit —
+  pure, unit-tested), `model`,
   `ai` (Copilot-CLI drafting via `processkit`: commit messages and PR title+body),
   `ai_loop` (the shared spinner + model-retry loop both drafts use), `settings`
   (per-user / per-repo AI model + pull-strategy + Conventional-Commits config,

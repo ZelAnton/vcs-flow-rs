@@ -119,6 +119,11 @@ the selected file on the right (a folder shows its children instead).
   `D` deleted (red), `R` renamed (cyan), `?` untracked (magenta, git only — the
   preview shows the file's content as added lines). A rename commits both the
   new path and the removal of the old one.
+- **Hunks** (git only): a modified file with two or more hunks folds open
+  (`→`) into its `@@ …` hunk rows — `Space` marks individual hunks, the file
+  shows `[~]` while only some are selected, and the right pane previews the
+  highlighted hunk. Hunk rows start collapsed; adds/deletes/renames/binary
+  files (and everything under jj) stay whole-file.
 - **`/` filters the tree** — type to narrow it to matching paths
   (case-insensitive substring), `Enter` keeps the filter, `Esc` clears it.
   Marks on hidden files are untouched, and `+`/`-` only affect what's visible.
@@ -154,8 +159,8 @@ push offer comes once, at the end of the session, for the last commit made).
 | Key | Action |
 |---|---|
 | `↑` `↓` | Move the cursor |
-| `←` `→` | Collapse / expand a folder |
-| `Space` | Toggle the selected file/folder (folders cascade, tri-state) |
+| `←` `→` | Collapse / expand a folder (or a file's hunk list) |
+| `Space` | Toggle the selected file/folder/hunk (folders cascade, tri-state) |
 | `+` / `-` | Select all / none (only the visible files while a filter is active) |
 | `/` | Filter the tree (type to narrow; `Enter` keeps it, `Esc` clears it) |
 | `a` | Toggle amend |
@@ -267,7 +272,14 @@ for a colocated git repo, or a `.gitignore` entry for a worktree / pure-jj repo.
 
 - **git** — commits exactly the selected paths' working-tree content to the
   current branch (`git commit --only <paths>`), regardless of what's staged.
-  `--amend` amends the branch tip.
+  `--amend` amends the branch tip. When some files are committed as a **hunk
+  subset**, the commit is assembled in a *temporary index* instead
+  (`GIT_INDEX_FILE` + `read-tree`/`apply --cached`/`commit-tree`): the working
+  tree and your real index are never touched, and the unselected hunks simply
+  stay in the working tree for a later commit. Two limits of that plumbing
+  path: git **commit hooks** and **`commit.gpgsign`** are skipped — keep
+  selections whole-file where those matter. An amend keeps all of the tip's
+  parents (amending a merge is safe).
 - **jj** — finalizes a commit containing the selected paths and advances the
   nearest bookmark onto it; deselected changes stay in the working copy. If
   several bookmarks are equally near, you pick one first. **Amend** squashes the
@@ -310,14 +322,20 @@ strictly **best-effort** — it never affects the push result — and runs only 
 `PATH`; otherwise it's skipped (with at most one dim notice).
 
 **If the pushed branch already has open PRs**, they're listed — number, title,
-base branch, and a *clickable* URL (an OSC 8 hyperlink; Windows Terminal and
-most modern emulators make it a real link, others still show the address):
+base branch, a *clickable* URL (an OSC 8 hyperlink; Windows Terminal and
+most modern emulators make it a real link, others still show the address), and
+a CI summary when the PR has checks (`✓` passed, `✗` failed, `●` pending):
 
 ```text
 Open pull request for 'feature/login':
   #42 Add rate-limited sign-in  → main
       https://github.com/you/repo/pull/42
+      checks: ✓5 ●1
+Open it in the browser? [y/N]
 ```
+
+Agreeing opens the PR with `gh pr view --web` (with several PRs listed, you're
+asked for the number instead).
 
 **If there are none**, `commit` offers to create one:
 
@@ -332,11 +350,15 @@ Create a pull request 'feature/login' → 'main'?  [Y]es / [n]o / [b]ase / [d]if
   branch against the current base, then re-asks.
 - `Y`/`Enter` proceeds: the PR **title + markdown description** are
   [AI-drafted](#ai-commit-messages) from the branch-vs-base diff (same Copilot
-  machinery, spinner, `Esc` to skip, model retry); you edit the result in the
+  machinery, spinner, `Esc` to skip, model retry). If the repository has a
+  **PR template** (`pull_request_template.md` in `.github/`, the root, or
+  `docs/` — any case), the AI is asked to fill it in; without Copilot the raw
+  template is pre-filled for you to complete. You edit the result in the
   multi-line editor — **first line = title**, the rest (after a blank line) =
-  description. Confirming opens the GitHub **PR-creation page in your browser**
-  with both prefilled (`gh pr create --web`), so nothing is published until you
-  press the button there. An empty title aborts.
+  description — then answer `Open it as a draft PR? [y/N]`. Confirming opens
+  the GitHub **PR-creation page in your browser** with everything prefilled
+  (`gh pr create --web [--draft]`), so nothing is published until you press
+  the button there. An empty title aborts.
 
 ### Reviewing the branch diff (and reverting)
 

@@ -24,7 +24,7 @@ use vcs_git::DiffSpec as GitDiff;
 use vcs_jj::{DiffSpec as JjDiff, JjFileset};
 
 use crate::AppResult;
-use crate::model::{BackendKind, ChangeKind, FileChange, Target};
+use crate::model::{BackendKind, ChangeKind, FileChange, HunkInfo, Target};
 use crate::settings::PullStrategy;
 
 /// The remote `commit` pushes to. The tools here assume the conventional `origin`.
@@ -48,6 +48,10 @@ pub struct Snapshot {
     /// Unified diff text keyed by [`FileChange::path`] — the same path shown in
     /// the tree, so a selected file always resolves to its diff.
     pub diffs: HashMap<String, String>,
+    /// Per-file hunks of *modified* files, keyed like [`Self::diffs`] — feeds
+    /// the hunk-level selection (git working-tree snapshots only; empty for jj
+    /// and for the PR branch review, which stay whole-file).
+    pub hunks: HashMap<String, Vec<HunkInfo>>,
 }
 
 /// A git or jj repository the tool operates on, wrapping the `vcs-core` facade.
@@ -95,7 +99,8 @@ impl Backend {
         if let Some(g) = self.repo.git_at() {
             // Typed `diff(WorkingTree)` is `diff HEAD … -M`, parsed per file. It
             // diffs the empty tree on an unborn repo, so no special-case is needed.
-            let mut snap = snapshot_from_git(g.diff(GitDiff::WorkingTree).await?);
+            // `with_hunks`: this is the snapshot the hunk-level selection feeds on.
+            let mut snap = snapshot_from_git(g.diff(GitDiff::WorkingTree).await?, true);
             // The diff can't see files git doesn't know yet — list them
             // separately (git applies the ignore rules, `-uall` enumerates
             // files inside untracked directories individually).
@@ -224,14 +229,21 @@ impl Backend {
     }
 
     /// Perform the commit of `paths` (repo-relative, forward slashes) with
-    /// `message`, optionally amending, onto `target`.
+    /// `message`, optionally amending, onto `target`. `partial` carries the
+    /// files committed as a *hunk subset* (`(path, selected hunk indices)`) —
+    /// git only and only when the user actually narrowed a file; the whole-file
+    /// fast path below is otherwise unchanged.
     pub async fn commit(
         &self,
         paths: &[String],
+        partial: &[(String, Vec<usize>)],
         message: &str,
         amend: bool,
         target: &Target,
     ) -> AppResult<()> {
+        if !partial.is_empty() && self.repo.git_at().is_some() {
+            return self.commit_partial(paths, partial, message, amend).await;
+        }
         if let Some(g) = self.repo.git_at() {
             // `commit --only` accepts a pathspec only for paths git knows;
             // selected *untracked* files must enter the index as intent-to-add
@@ -299,6 +311,39 @@ impl Backend {
             unreachable!()
         }
         Ok(())
+    }
+
+    /// Commit `whole` files plus per-file hunk subsets `partial` — git only.
+    ///
+    /// Runs entirely against a **temporary index** (`GIT_INDEX_FILE`), so the
+    /// user's real index and working tree are never touched: unselected hunks
+    /// simply stay in the working tree, and a crash leaves only a throwaway
+    /// temp file. Sequence: seed the temp index from `HEAD` (the committed
+    /// content everything keeps), `add -A` the whole files, `apply --cached` a
+    /// byte-exact patch of each partial file's selected hunks, `write-tree`,
+    /// `commit-tree` (parent = `HEAD`, or `HEAD`'s own parents for an amend),
+    /// `update-ref HEAD` guarded by the old tip.
+    ///
+    /// Known v1 limits (documented in the README): this plumbing path skips
+    /// commit hooks and `commit.gpgsign` — use whole-file selection where those
+    /// matter.
+    async fn commit_partial(
+        &self,
+        whole: &[String],
+        partial: &[(String, Vec<usize>)],
+        message: &str,
+        amend: bool,
+    ) -> AppResult<()> {
+        let root = self.repo.root().to_path_buf();
+        let dir = std::env::temp_dir().join("vcs-flow-commit");
+        std::fs::create_dir_all(&dir)?;
+        let stamp = backup_stamp();
+        let index = dir.join(format!("index-{stamp}"));
+
+        let res =
+            commit_partial_steps(&root, &index, &dir, &stamp, whole, partial, message, amend).await;
+        let _ = std::fs::remove_file(&index); // throwaway on every exit
+        res
     }
 
     // ----- push flow -------------------------------------------------------
@@ -654,8 +699,10 @@ impl Backend {
         let g = self
             .review_git()
             .ok_or("branch review needs a git working copy")?;
+        // No hunks: the review/revert flow is whole-file.
         Ok(snapshot_from_git(
             g.diff(GitDiff::Rev(review_spec(base, head))).await?,
+            false,
         ))
     }
 
@@ -766,6 +813,191 @@ fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_string()).collect()
 }
 
+/// The [`Backend::commit_partial`] plumbing sequence. Free function (not a
+/// method) so the temp-index cleanup wrapper stays trivial.
+#[allow(clippy::too_many_arguments)]
+async fn commit_partial_steps(
+    root: &Path,
+    index: &Path,
+    dir: &Path,
+    stamp: &str,
+    whole: &[String],
+    partial: &[(String, Vec<usize>)],
+    message: &str,
+    amend: bool,
+) -> AppResult<()> {
+    // 1. The current tip (None on an unborn repo — possible only for a normal
+    //    commit; partial hunks need a modified file, which needs a born HEAD).
+    let head = plumb_probe(root, index, args(&["rev-parse", "--verify", "-q", "HEAD"])).await?;
+
+    // 2. Temp index = HEAD's tree: the baseline every unselected change keeps.
+    match &head {
+        Some(_) => plumb(root, index, args(&["read-tree", "HEAD"])).await?,
+        None => plumb(root, index, args(&["read-tree", "--empty"])).await?,
+    };
+
+    // 3. Whole files: `add -A` stages adds, edits, deletions, and untracked
+    //    files for these pathspecs — into the temp index only.
+    if !whole.is_empty() {
+        let mut a = args(&["add", "-A", "--"]);
+        a.extend(whole.iter().cloned());
+        plumb(root, index, a).await?;
+    }
+
+    // 4. Partial files: regenerate each file's HEAD→worktree patch byte-exact
+    //    (`--output=`, never through a lossy string), keep only the selected
+    //    hunks, apply to the temp index.
+    for (n, (path, selected)) in partial.iter().enumerate() {
+        let patch_file = dir.join(format!("hunks-{stamp}-{n}.patch"));
+        let mut d = args(&[
+            "diff",
+            "HEAD",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            &format!("--output={}", patch_file.display()),
+            "--",
+        ]);
+        d.push(path.clone());
+        let diff_res = plumb(root, index, d).await;
+        let bytes = diff_res.and_then(|_| Ok(std::fs::read(&patch_file)?));
+        let applied = match bytes {
+            Ok(bytes) => {
+                let (header, hunks) = crate::patch::split(&bytes);
+                if selected.iter().any(|&k| k >= hunks.len()) {
+                    // The file changed on disk after the snapshot was taken.
+                    Err(format!(
+                        "'{path}' changed since the file list was captured — \
+                         nothing committed; re-run commit"
+                    )
+                    .into())
+                } else {
+                    let assembled = crate::patch::assemble(&header, &hunks, selected);
+                    let apply_file = dir.join(format!("apply-{stamp}-{n}.patch"));
+                    let write = std::fs::write(&apply_file, &assembled);
+                    let res = match write {
+                        Ok(()) => {
+                            plumb(
+                                root,
+                                index,
+                                args(&[
+                                    "apply",
+                                    "--cached",
+                                    "--whitespace=nowarn",
+                                    &apply_file.to_string_lossy(),
+                                ]),
+                            )
+                            .await
+                        }
+                        Err(e) => Err(e.into()),
+                    };
+                    let _ = std::fs::remove_file(&apply_file);
+                    res.map(|_| ())
+                }
+            }
+            Err(e) => Err(e),
+        };
+        let _ = std::fs::remove_file(&patch_file);
+        applied?;
+    }
+
+    // 5-6. Write the tree and create the commit. An amend keeps HEAD's own
+    //      parents (all of them — amending a merge must not drop one); a normal
+    //      commit has HEAD as the single parent; an unborn first commit has none.
+    let tree = plumb(root, index, args(&["write-tree"])).await?;
+    let mut ct = args(&["commit-tree", &tree, "-m", message]);
+    match (&head, amend) {
+        (Some(_), false) => {
+            ct.push("-p".into());
+            ct.push("HEAD".into());
+        }
+        (Some(_), true) => {
+            let parents = plumb(root, index, args(&["log", "-1", "--format=%P", "HEAD"])).await?;
+            for p in parents.split_whitespace() {
+                ct.push("-p".into());
+                ct.push(p.to_string());
+            }
+        }
+        (None, _) => {} // first commit
+    }
+    let new = plumb(root, index, ct).await?;
+
+    // 7. Advance the branch, compare-and-swap against the tip from step 1 so a
+    //    concurrent move aborts instead of being overwritten.
+    let mut ur = args(&["update-ref", "HEAD", &new]);
+    if let Some(old) = &head {
+        ur.push(old.clone());
+    }
+    plumb(root, index, ur).await?;
+
+    // 8. Refresh the *real* index entries of the committed paths to the new
+    //    HEAD. Plumbing moved HEAD without telling the index (a porcelain
+    //    `git commit` does this itself); stale entries would show up as
+    //    phantom staged changes in `git status` — and falsely trip the
+    //    dirty-tree guard before an integration. Working tree untouched.
+    let mut rs = args(&["reset", "-q", "--"]);
+    rs.extend(whole.iter().cloned());
+    rs.extend(partial.iter().map(|(p, _)| p.clone()));
+    plumb_real(root, rs).await?;
+    Ok(())
+}
+
+/// One plumbing `git` step against the temporary index: trimmed stdout on
+/// success, an error carrying git's diagnostic otherwise. The cwd is pinned to
+/// the repo root explicitly (this path must not depend on `main`'s setup).
+async fn plumb(root: &Path, index: &Path, argv: Vec<String>) -> AppResult<String> {
+    let label = argv.first().cloned().unwrap_or_default();
+    let result = processkit::Command::new("git")
+        .args(argv)
+        .current_dir(root)
+        .env("GIT_INDEX_FILE", index)
+        .output_string()
+        .await
+        .map_err(|e| format!("git {label}: {e}"))?;
+    if !result.is_success() {
+        let d = result.diagnostic();
+        let d = if d.is_empty() { "(no output)" } else { d };
+        return Err(format!("git {label}: {d}").into());
+    }
+    Ok(result.stdout().trim().to_string())
+}
+
+/// [`plumb`] against the *real* index (no `GIT_INDEX_FILE`) — for the final
+/// index refresh only.
+async fn plumb_real(root: &Path, argv: Vec<String>) -> AppResult<String> {
+    let label = argv.first().cloned().unwrap_or_default();
+    let result = processkit::Command::new("git")
+        .args(argv)
+        .current_dir(root)
+        .output_string()
+        .await
+        .map_err(|e| format!("git {label}: {e}"))?;
+    if !result.is_success() {
+        let d = result.diagnostic();
+        let d = if d.is_empty() { "(no output)" } else { d };
+        return Err(format!("git {label}: {d}").into());
+    }
+    Ok(result.stdout().trim().to_string())
+}
+
+/// [`plumb`] that treats a non-zero exit as `None` (e.g. probing an unborn
+/// `HEAD`); only a spawn failure is an error.
+async fn plumb_probe(root: &Path, index: &Path, argv: Vec<String>) -> AppResult<Option<String>> {
+    let label = argv.first().cloned().unwrap_or_default();
+    let result = processkit::Command::new("git")
+        .args(argv)
+        .current_dir(root)
+        .env("GIT_INDEX_FILE", index)
+        .output_string()
+        .await
+        .map_err(|e| format!("git {label}: {e}"))?;
+    if result.is_success() {
+        Ok(Some(result.stdout().trim().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 /// git `rev-list --count` range whose count is how many commits `origin/<rb>` has
 /// that local `<name>` lacks — i.e. the "behind" count (`A..B` = in B, not in A).
 fn git_behind_range(name: &str, remote_branch: &str) -> String {
@@ -845,23 +1077,36 @@ fn parse_git_upstream(upstream: &str) -> Option<String> {
 /// Map a [`vcs_git::FileDiff`] list into a [`Snapshot`]: the file change list and
 /// the per-file raw diff text both come from the typed parse, so the tree path and
 /// the diff key always agree. Paths are already forward-slash normalised, and a
-/// rename carries the new path with the original on `old_path`.
-fn snapshot_from_git(files: Vec<vcs_git::FileDiff>) -> Snapshot {
+/// rename carries the new path with the original on `old_path`. `with_hunks`
+/// additionally records modified files' hunks (for the hunk-level selection —
+/// only the working-tree snapshot wants them, the PR branch review doesn't).
+fn snapshot_from_git(files: Vec<vcs_git::FileDiff>, with_hunks: bool) -> Snapshot {
     let mut changes = Vec::with_capacity(files.len());
     let mut diffs = HashMap::new();
+    let mut hunks = HashMap::new();
     for f in files {
         changes.push(FileChange {
             path: f.path.clone(),
             old_path: f.old_path,
             kind: git_kind(f.change),
         });
+        // Only plain modifications are hunk-splittable: adds/deletes/renames
+        // commit whole (and binary files have no hunks to begin with).
+        if with_hunks && matches!(f.change, vcs_git::ChangeKind::Modified) && !f.hunks.is_empty() {
+            hunks.insert(f.path.clone(), f.hunks.iter().map(hunk_info).collect());
+        }
         diffs.insert(f.path, f.raw);
     }
-    Snapshot { changes, diffs }
+    Snapshot {
+        changes,
+        diffs,
+        hunks,
+    }
 }
 
 /// jj counterpart of [`snapshot_from_git`] — the two `FileDiff` types are
-/// structurally identical but distinct per crate.
+/// structurally identical but distinct per crate. jj has no hunk-level commit
+/// (no non-interactive split), so no hunks are recorded.
 fn snapshot_from_jj(files: Vec<vcs_jj::FileDiff>) -> Snapshot {
     let mut changes = Vec::with_capacity(files.len());
     let mut diffs = HashMap::new();
@@ -873,7 +1118,59 @@ fn snapshot_from_jj(files: Vec<vcs_jj::FileDiff>) -> Snapshot {
         });
         diffs.insert(f.path, f.raw);
     }
-    Snapshot { changes, diffs }
+    Snapshot {
+        changes,
+        diffs,
+        hunks: HashMap::new(),
+    }
+}
+
+/// Display-side [`HunkInfo`] from a typed hunk: the reconstructed `@@` header
+/// and the prefixed body lines.
+fn hunk_info(h: &vcs_git::Hunk) -> HunkInfo {
+    let lines: Vec<(char, &str)> = h
+        .lines
+        .iter()
+        .filter_map(|l| match l {
+            vcs_git::DiffLine::Context(s) => Some((' ', s.as_str())),
+            vcs_git::DiffLine::Added(s) => Some(('+', s.as_str())),
+            vcs_git::DiffLine::Removed(s) => Some(('-', s.as_str())),
+            _ => None, // `#[non_exhaustive]` — skip unknown future line kinds
+        })
+        .collect();
+    build_hunk_info(
+        h.old_start,
+        h.old_lines,
+        h.new_start,
+        h.new_lines,
+        &h.section,
+        &lines,
+    )
+}
+
+/// [`hunk_info`] on plain values — split out because `vcs_git::Hunk` is
+/// `#[non_exhaustive]` and can't be built in unit tests.
+fn build_hunk_info(
+    old_start: usize,
+    old_lines: usize,
+    new_start: usize,
+    new_lines: usize,
+    section: &str,
+    lines: &[(char, &str)],
+) -> HunkInfo {
+    let mut header = format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@");
+    if !section.is_empty() {
+        header.push(' ');
+        header.push_str(section);
+    }
+    let mut text = header.clone();
+    text.push('\n');
+    for (prefix, line) in lines {
+        text.push(*prefix);
+        text.push_str(line);
+        text.push('\n');
+    }
+    HunkInfo { header, text }
 }
 
 /// Map the toolkit git `ChangeKind` onto the local model kind. (`#[non_exhaustive]`,
@@ -941,6 +1238,104 @@ mod tests {
         assert!(untracked_preview(&empty).contains("empty"));
         assert!(untracked_preview(&dir.join("missing")).contains("unreadable"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_hunk_info_reconstructs_header_and_prefixes_lines() {
+        let h = build_hunk_info(
+            10,
+            3,
+            10,
+            4,
+            "fn main()",
+            &[(' ', "ctx"), ('-', "old"), ('+', "new1"), ('+', "new2")],
+        );
+        assert_eq!(h.header, "@@ -10,3 +10,4 @@ fn main()");
+        assert_eq!(
+            h.text,
+            "@@ -10,3 +10,4 @@ fn main()\n ctx\n-old\n+new1\n+new2\n"
+        );
+        // No section → no trailing space after the header.
+        let bare = build_hunk_info(1, 1, 1, 1, "", &[]);
+        assert_eq!(bare.header, "@@ -1,1 +1,1 @@");
+        assert_eq!(bare.text, "@@ -1,1 +1,1 @@\n");
+    }
+
+    /// Spawns the real `git` CLI (project convention: `#[ignore]`, run with
+    /// `cargo test -p vcs-flow-commit -- --ignored`). End-to-end check of the
+    /// temp-index plumbing: commit one hunk of a two-hunk file plus a whole
+    /// file; the working tree and the real index must stay untouched.
+    #[tokio::test]
+    #[ignore = "spawns the real git CLI"]
+    async fn commit_partial_commits_only_selected_hunks() {
+        let dir = std::env::temp_dir().join(format!("vcs-flow-partial-{}", backup_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        // Two widely-separated regions → two hunks once both are edited.
+        let filler_a = "a\n".repeat(10);
+        let filler_b = "b\n".repeat(10);
+        std::fs::write(
+            dir.join("f.txt"),
+            format!("start\n{filler_a}middle\n{filler_b}end\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("w.txt"), "whole\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        std::fs::write(
+            dir.join("f.txt"),
+            format!("START\n{filler_a}middle\n{filler_b}END\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("w.txt"), "whole2\n").unwrap();
+
+        let backend = Backend::open(&dir).unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.hunks.get("f.txt").map(Vec::len), Some(2));
+
+        // Commit hunk 0 of f.txt plus w.txt whole.
+        backend
+            .commit(
+                &["w.txt".into()],
+                &[("f.txt".into(), vec![0])],
+                "partial commit",
+                false,
+                &Target {
+                    label: "main".into(),
+                    revision: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // HEAD carries hunk 0 (START) but not hunk 1 (end stays lowercase)…
+        let committed = run(&["show", "HEAD:f.txt"]);
+        assert!(committed.contains("START") && !committed.contains("END"));
+        assert!(run(&["show", "HEAD:w.txt"]).contains("whole2"));
+        assert!(run(&["log", "-1", "--format=%s"]).trim() == "partial commit");
+        // …the working tree still has both edits…
+        let worktree = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert!(worktree.contains("START") && worktree.contains("END"));
+        // …the real index is untouched, and only hunk 1 remains uncommitted.
+        assert!(run(&["diff", "--cached", "--name-only"]).trim().is_empty());
+        assert_eq!(run(&["diff", "--name-only"]).trim(), "f.txt");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -49,6 +49,21 @@ to a dated version section.
   **Conventional Commits** setting (`conventional` / `COMMIT_CONVENTIONAL`)
   steers the AI draft to `type(scope): subject` and falls back to a type picker
   when the draft has no recognized type.
+- `commit`: **hunk-level selection** (git) — a modified file with 2+ hunks folds
+  open into its `@@` rows; `Space` marks individual hunks and only those land in
+  the commit. Partial commits are assembled in a temporary index
+  (`GIT_INDEX_FILE` plumbing: `read-tree` → `add -A`/`apply --cached` with a
+  byte-exact `git diff --output` patch → `write-tree`/`commit-tree`/`update-ref`
+  with a compare-and-swap, then a real-index refresh of the committed paths) —
+  the working tree and real index are never touched, unselected hunks stay put,
+  and an amend keeps all of the tip's parents. Limits: this path skips commit
+  hooks and `commit.gpgsign`. jj stays whole-file (no non-interactive split).
+- `commit`: PR-step polish — the open-PR listing shows a CI summary per PR
+  (`checks: ✓ ✗ ●` from `statusCheckRollup`) and offers to open a listed PR in
+  the browser (`gh pr view --web`); PR creation fills the repository's
+  `pull_request_template.md` (`.github/` / root / `docs/`, any case) via the AI
+  draft (or pre-fills it raw without Copilot) and asks `Open it as a draft PR?`
+  (`--draft`).
 - `commit`: multi-commit sessions — after a commit, if changed files remain, the
   tool offers another select-and-commit round (`[y/N]`, default no); the push
   offer comes once at the end, for the last commit of the session.

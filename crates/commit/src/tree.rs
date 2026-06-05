@@ -7,9 +7,9 @@
 //! split between `aa/bb` and `aa/bb/cc` yield an `aa/bb` node containing a `cc`
 //! node plus the loose files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::model::{ChangeKind, FileChange};
+use crate::model::{ChangeKind, FileChange, HunkInfo};
 
 /// Selection status of a node, derived from its descendant files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,11 +19,19 @@ pub enum SelectState {
     Partial,
 }
 
-/// Whether a tree node is a directory or a concrete changed file.
+/// Whether a tree node is a directory, a concrete changed file, or one hunk
+/// of a modified file (git only — a leaf child of its file node).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKind {
     Dir,
-    File { index: usize, kind: ChangeKind },
+    File {
+        index: usize,
+        kind: ChangeKind,
+    },
+    Hunk {
+        file_index: usize,
+        hunk_index: usize,
+    },
 }
 
 /// One node of the compressed tree.
@@ -48,22 +56,64 @@ impl Node {
 
     /// Tree-widget identifier — must be unique even when a tracked file and a
     /// directory share a path (a file replaced by a same-named directory, with
-    /// the new entry staged). Directories get a trailing slash; files don't.
+    /// the new entry staged). Directories get a trailing slash; files don't;
+    /// hunks append `#<index>` to their file's id (`#` can't collide with the
+    /// other shapes — a path named `x#1` yields a *file* id `x#1`, but its
+    /// hypothetical hunks would be `x#1#0`, still unique).
     pub fn id(&self) -> String {
-        if self.is_dir() {
-            format!("{}/", self.path)
-        } else {
-            self.path.clone()
+        match &self.kind {
+            NodeKind::Dir => format!("{}/", self.path),
+            NodeKind::File { .. } => self.path.clone(),
+            NodeKind::Hunk { hunk_index, .. } => format!("{}#{hunk_index}", self.path),
         }
     }
 }
 
-/// The full picker model: the compressed forest plus per-file selection.
+/// Selection state of one file: whole-file by default, or per-hunk once the
+/// file offers hunk granularity (then `whole` is derived: all hunks on).
+#[derive(Debug, Clone)]
+struct FileSel {
+    whole: bool,
+    hunks: Option<Vec<bool>>,
+}
+
+impl FileSel {
+    /// `(selected, total)` selection units: hunks when split, else the file (1).
+    fn units(&self) -> (usize, usize) {
+        match &self.hunks {
+            Some(h) => (h.iter().filter(|&&b| b).count(), h.len()),
+            None => (usize::from(self.whole), 1),
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.units().0 > 0
+    }
+
+    fn all(&self) -> bool {
+        let (sel, total) = self.units();
+        sel == total
+    }
+
+    fn set(&mut self, value: bool) {
+        self.whole = value;
+        if let Some(h) = &mut self.hunks {
+            for b in h {
+                *b = value;
+            }
+        }
+    }
+}
+
+/// The full picker model: the compressed forest plus per-file (and, for
+/// hunk-split files, per-hunk) selection.
 #[derive(Debug, Clone)]
 pub struct TreeModel {
     pub roots: Vec<Node>,
-    /// Selected flag per file, indexed by the original change index.
-    selected: Vec<bool>,
+    /// Selection per file, indexed by the original change index.
+    selected: Vec<FileSel>,
+    /// Hunk row labels per change index (empty → the file has no hunk children).
+    hunk_labels: Vec<Vec<String>>,
 }
 
 impl TreeModel {
@@ -71,11 +121,34 @@ impl TreeModel {
     pub fn build(changes: &[FileChange]) -> Self {
         let mut model = TreeModel {
             roots: Vec::new(),
-            selected: vec![true; changes.len()],
+            selected: vec![
+                FileSel {
+                    whole: true,
+                    hunks: None,
+                };
+                changes.len()
+            ],
+            hunk_labels: vec![Vec::new(); changes.len()],
         };
         let all: Vec<usize> = (0..changes.len()).collect();
         model.rebuild_view(changes, &all);
         model
+    }
+
+    /// Enable hunk-level selection (git only): files present in `hunks` with at
+    /// least two hunks gain hunk children (a single hunk is the whole change —
+    /// nothing to subdivide). Everything starts selected, like files do.
+    pub fn with_hunks(&mut self, changes: &[FileChange], hunks: &HashMap<String, Vec<HunkInfo>>) {
+        for (i, c) in changes.iter().enumerate() {
+            if let Some(hs) = hunks.get(&c.path)
+                && hs.len() >= 2
+            {
+                self.hunk_labels[i] = hs.iter().map(|h| h.header.clone()).collect();
+                self.selected[i].hunks = Some(vec![true; hs.len()]);
+            }
+        }
+        let all: Vec<usize> = (0..changes.len()).collect();
+        self.rebuild_view(changes, &all);
     }
 
     /// Rebuild the visible forest from the subset of `changes` whose original
@@ -103,17 +176,35 @@ impl TreeModel {
         for node in &mut roots {
             compress(node);
         }
+        attach_hunks(&mut roots, &self.hunk_labels);
         self.roots = roots;
     }
 
-    /// Selection status of a node from its descendant files.
+    /// Selection status of a node from its descendant selection units (hunks
+    /// for hunk-split files, the file itself otherwise).
     pub fn state_of(&self, node: &Node) -> SelectState {
-        let total = node.files.len();
-        if total == 0 {
-            return SelectState::None;
+        if let NodeKind::Hunk {
+            file_index,
+            hunk_index,
+        } = &node.kind
+        {
+            let on = self.selected[*file_index]
+                .hunks
+                .as_ref()
+                .is_some_and(|h| h.get(*hunk_index).copied().unwrap_or(false));
+            return if on {
+                SelectState::All
+            } else {
+                SelectState::None
+            };
         }
-        let sel = node.files.iter().filter(|&&i| self.selected[i]).count();
-        if sel == 0 {
+        let (mut sel, mut total) = (0usize, 0usize);
+        for &i in &node.files {
+            let (s, t) = self.selected[i].units();
+            sel += s;
+            total += t;
+        }
+        if total == 0 || sel == 0 {
             SelectState::None
         } else if sel == total {
             SelectState::All
@@ -122,22 +213,37 @@ impl TreeModel {
         }
     }
 
-    /// Toggle the node with identifier `id` (see [`Node::id`]): a fully-selected
-    /// node clears; anything else (partial or empty) selects all its files.
+    /// Toggle the node with identifier `id` (see [`Node::id`]). A hunk flips
+    /// alone; for a file or directory, a fully-selected node clears and
+    /// anything else (partial or empty) selects everything under it.
     pub fn toggle(&mut self, id: &str) {
-        let Some(files) = self.find(id).map(|n| n.files.clone()) else {
+        let Some(node) = self.find(id) else {
             return;
         };
-        let fully = files.iter().all(|&i| self.selected[i]);
+        let kind = node.kind.clone();
+        let files = node.files.clone();
+        if let NodeKind::Hunk {
+            file_index,
+            hunk_index,
+        } = kind
+        {
+            if let Some(h) = &mut self.selected[file_index].hunks
+                && let Some(b) = h.get_mut(hunk_index)
+            {
+                *b = !*b;
+            }
+            return;
+        }
+        let fully = files.iter().all(|&i| self.selected[i].all());
         for i in files {
-            self.selected[i] = !fully;
+            self.selected[i].set(!fully);
         }
     }
 
     /// Select (`true`) or clear (`false`) every file.
     pub fn set_all(&mut self, value: bool) {
         for s in &mut self.selected {
-            *s = value;
+            s.set(value);
         }
     }
 
@@ -148,7 +254,7 @@ impl TreeModel {
         let mut files = Vec::new();
         collect_files(&self.roots, &mut files);
         for i in files {
-            self.selected[i] = value;
+            self.selected[i].set(value);
         }
     }
 
@@ -160,11 +266,18 @@ impl TreeModel {
                 if nid == id {
                     return Some(n);
                 }
-                // A dir id ends with `/`, so `id` under it starts with `nid`.
-                if n.is_dir()
-                    && id.starts_with(&nid)
-                    && let Some(found) = walk(&n.children, id)
-                {
+                // A dir id ends with `/`, so `id` under it starts with `nid`;
+                // a hunk id is its file's id plus `#<k>`.
+                let descend = match &n.kind {
+                    NodeKind::Dir => id.starts_with(&nid),
+                    NodeKind::File { .. } => {
+                        !n.children.is_empty()
+                            && id.starts_with(&nid)
+                            && id[nid.len()..].starts_with('#')
+                    }
+                    NodeKind::Hunk { .. } => false,
+                };
+                if descend && let Some(found) = walk(&n.children, id) {
                     return Some(found);
                 }
             }
@@ -173,13 +286,14 @@ impl TreeModel {
         walk(&self.roots, id)
     }
 
-    /// Paths to hand to the commit command for the selected files, repo-relative,
-    /// forward slashes. A renamed file contributes both its new and old path so
-    /// the deletion of the old path is committed alongside the addition.
+    /// Paths of every file participating in the commit (whole or via a hunk
+    /// subset), repo-relative, forward slashes. A renamed file contributes both
+    /// its new and old path so the deletion of the old path is committed
+    /// alongside the addition.
     pub fn selected_paths(&self, changes: &[FileChange]) -> Vec<String> {
         let mut out = Vec::new();
         for (i, c) in changes.iter().enumerate() {
-            if self.selected[i] {
+            if self.selected[i].any() {
                 out.push(c.path.clone());
                 if let Some(old) = &c.old_path {
                     out.push(old.clone());
@@ -189,8 +303,77 @@ impl TreeModel {
         out
     }
 
+    /// Paths committed *whole*: fully-selected files (a hunk-split file counts
+    /// once every hunk is on). New + old (rename) paths, like
+    /// [`selected_paths`](Self::selected_paths).
+    pub fn selected_whole_paths(&self, changes: &[FileChange]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, c) in changes.iter().enumerate() {
+            let s = &self.selected[i];
+            if s.any() && s.all() {
+                out.push(c.path.clone());
+                if let Some(old) = &c.old_path {
+                    out.push(old.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Files with only a *subset* of hunks selected: `(path, hunk indices)`.
+    pub fn selected_partial(&self, changes: &[FileChange]) -> Vec<(String, Vec<usize>)> {
+        let mut out = Vec::new();
+        for (i, c) in changes.iter().enumerate() {
+            let Some(h) = &self.selected[i].hunks else {
+                continue;
+            };
+            let on: Vec<usize> = h
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b)
+                .map(|(k, _)| k)
+                .collect();
+            if !on.is_empty() && on.len() < h.len() {
+                out.push((c.path.clone(), on));
+            }
+        }
+        out
+    }
+
+    /// Count of files with at least one selection unit on.
     pub fn selected_count(&self) -> usize {
-        self.selected.iter().filter(|&&s| s).count()
+        self.selected.iter().filter(|s| s.any()).count()
+    }
+}
+
+/// Give every hunk-split file its hunk children (leaves labelled by the `@@`
+/// headers). Runs after compression on every view rebuild, so a filtered view
+/// keeps the same hunk rows.
+fn attach_hunks(nodes: &mut [Node], labels: &[Vec<String>]) {
+    for n in nodes {
+        match &n.kind {
+            NodeKind::Dir => attach_hunks(&mut n.children, labels),
+            NodeKind::File { index, .. } => {
+                let i = *index;
+                if !labels[i].is_empty() {
+                    n.children = labels[i]
+                        .iter()
+                        .enumerate()
+                        .map(|(k, label)| Node {
+                            label: label.clone(),
+                            path: n.path.clone(),
+                            kind: NodeKind::Hunk {
+                                file_index: i,
+                                hunk_index: k,
+                            },
+                            children: Vec::new(),
+                            files: vec![i],
+                        })
+                        .collect();
+                }
+            }
+            NodeKind::Hunk { .. } => {}
+        }
     }
 }
 
@@ -258,6 +441,7 @@ fn collect_files(nodes: &[Node], out: &mut Vec<usize>) {
         match n.kind {
             NodeKind::File { index, .. } => out.push(index),
             NodeKind::Dir => collect_files(&n.children, out),
+            NodeKind::Hunk { .. } => {} // its file node already contributed
         }
     }
 }
@@ -395,6 +579,98 @@ mod tests {
         t.rebuild_view(&c, &[0, 1, 2]); // back to full view
         // docs/x.md was invisible and keeps its mark.
         assert_eq!(t.selected_paths(&c), vec!["docs/x.md".to_string()]);
+    }
+
+    fn hunk_map(path: &str, n: usize) -> HashMap<String, Vec<HunkInfo>> {
+        let mut m = HashMap::new();
+        m.insert(
+            path.to_string(),
+            (0..n)
+                .map(|k| HunkInfo {
+                    header: format!("@@ -{k} +{k} @@"),
+                    text: format!("@@ -{k} +{k} @@\n+line{k}\n"),
+                })
+                .collect(),
+        );
+        m
+    }
+
+    #[test]
+    fn with_hunks_adds_children_only_for_multi_hunk_files() {
+        let c = changes(&["src/a.rs", "src/b.rs"]);
+        let mut t = TreeModel::build(&c);
+        let mut hunks = hunk_map("src/a.rs", 3);
+        hunks.extend(hunk_map("src/b.rs", 1)); // single hunk → no children
+        t.with_hunks(&c, &hunks);
+        let dir = &t.roots[0];
+        let a = dir.children.iter().find(|n| n.label == "a.rs").unwrap();
+        let b = dir.children.iter().find(|n| n.label == "b.rs").unwrap();
+        assert_eq!(a.children.len(), 3);
+        assert!(b.children.is_empty());
+        assert!(matches!(
+            a.children[1].kind,
+            NodeKind::Hunk {
+                file_index: 0,
+                hunk_index: 1
+            }
+        ));
+        assert_eq!(a.children[1].id(), "src/a.rs#1");
+    }
+
+    #[test]
+    fn hunk_toggle_drives_tristate_and_selectors() {
+        let c = changes(&["src/a.rs", "src/b.rs"]);
+        let mut t = TreeModel::build(&c);
+        t.with_hunks(&c, &hunk_map("src/a.rs", 3));
+
+        // Everything starts fully selected → no partial set.
+        assert!(t.selected_partial(&c).is_empty());
+        assert_eq!(t.selected_whole_paths(&c).len(), 2);
+
+        // Drop one hunk: the file (and the dir above) turn partial.
+        t.toggle("src/a.rs#1");
+        let a = t.find("src/a.rs").unwrap().clone();
+        assert_eq!(t.state_of(&a), SelectState::Partial);
+        assert_eq!(t.state_of(&t.roots[0].clone()), SelectState::Partial);
+        assert_eq!(
+            t.selected_partial(&c),
+            vec![("src/a.rs".into(), vec![0, 2])]
+        );
+        // The partial file leaves the whole list but stays in selected_paths.
+        assert_eq!(t.selected_whole_paths(&c), vec!["src/b.rs".to_string()]);
+        assert_eq!(t.selected_paths(&c).len(), 2);
+        assert_eq!(t.selected_count(), 2);
+
+        // Toggling the file node from partial selects every hunk again…
+        t.toggle("src/a.rs");
+        assert!(t.selected_partial(&c).is_empty());
+        assert_eq!(t.selected_whole_paths(&c).len(), 2);
+        // …and from full it clears them all.
+        t.toggle("src/a.rs");
+        let a = t.find("src/a.rs").unwrap().clone();
+        assert_eq!(t.state_of(&a), SelectState::None);
+        assert_eq!(t.selected_count(), 1);
+
+        // A single selected hunk: partial again; hunk node states differ.
+        t.toggle("src/a.rs#2");
+        let on = t.find("src/a.rs#2").unwrap().clone();
+        let off = t.find("src/a.rs#0").unwrap().clone();
+        assert_eq!(t.state_of(&on), SelectState::All);
+        assert_eq!(t.state_of(&off), SelectState::None);
+        assert_eq!(t.selected_partial(&c), vec![("src/a.rs".into(), vec![2])]);
+    }
+
+    #[test]
+    fn hunk_children_survive_filtered_rebuilds() {
+        let c = changes(&["src/a.rs", "docs/x.md"]);
+        let mut t = TreeModel::build(&c);
+        t.with_hunks(&c, &hunk_map("src/a.rs", 2));
+        t.toggle("src/a.rs#0");
+        // Narrow to src/ and back — children and hunk marks survive.
+        t.rebuild_view(&c, &[0]);
+        assert_eq!(t.find("src/a.rs").unwrap().children.len(), 2);
+        t.rebuild_view(&c, &[0, 1]);
+        assert_eq!(t.selected_partial(&c), vec![("src/a.rs".into(), vec![1])]);
     }
 
     #[test]

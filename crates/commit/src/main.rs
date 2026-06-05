@@ -8,6 +8,7 @@
 mod ai;
 mod ai_loop;
 mod model;
+mod patch;
 mod pr;
 mod prompt;
 mod push;
@@ -111,6 +112,9 @@ async fn run() -> AppResult<ExitCode> {
         // Fresh targets each round: a jj commit moves the bookmark (and `@`).
         let targets = backend.targets().await?;
         let mut tree = TreeModel::build(&snapshot.changes);
+        // Hunk-level granularity for multi-hunk modified files (git only —
+        // `snapshot.hunks` is empty for jj, leaving the tree whole-file).
+        tree.with_hunks(&snapshot.changes, &snapshot.hunks);
 
         // Interactive session: the terminal is restored when `guard` drops at
         // the end of this block, before any commit output is printed.
@@ -136,11 +140,14 @@ async fn run() -> AppResult<ExitCode> {
             break; // a later-round cancel still push-offers the earlier commits
         };
 
-        let paths = tree.selected_paths(&snapshot.changes);
+        // Whole files and per-file hunk subsets travel separately; `partial` is
+        // non-empty only when the user narrowed a file to some of its hunks.
+        let whole = tree.selected_whole_paths(&snapshot.changes);
+        let partial = tree.selected_partial(&snapshot.changes);
         // Count selected files for the summary, not emitted paths (a rename emits two).
         let file_count = tree.selected_count();
         backend
-            .commit(&paths, &plan.message, plan.amend, &plan.target)
+            .commit(&whole, &partial, &plan.message, plan.amend, &plan.target)
             .await?;
         println!("{}", success_line(backend.kind(), &plan, file_count));
         last = Some(plan);
@@ -250,21 +257,36 @@ async fn interactive(
     }))
 }
 
-/// Concatenate the diffs of exactly the selected files. `selected_paths` carries
-/// new (and, for renames, old) paths; `Snapshot::diffs` is keyed by the new path,
-/// so filtering changes by membership and joining their diffs yields the diff the
-/// user is about to commit.
+/// Concatenate the diff of exactly what's being committed: the full diff of
+/// whole-selected files, and only the selected hunks of partially-selected
+/// ones — so the AI drafts from what will actually land.
 fn selected_diff(snapshot: &Snapshot, tree: &TreeModel) -> String {
-    let selected = tree.selected_paths(&snapshot.changes);
-    let set: std::collections::HashSet<&str> = selected.iter().map(String::as_str).collect();
-    snapshot
-        .changes
-        .iter()
-        .filter(|c| set.contains(c.path.as_str()))
-        .filter_map(|c| snapshot.diffs.get(&c.path))
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let whole = tree.selected_whole_paths(&snapshot.changes);
+    let whole_set: std::collections::HashSet<&str> = whole.iter().map(String::as_str).collect();
+    let partial: std::collections::HashMap<String, Vec<usize>> = tree
+        .selected_partial(&snapshot.changes)
+        .into_iter()
+        .collect();
+
+    let mut parts: Vec<String> = Vec::new();
+    for c in &snapshot.changes {
+        if whole_set.contains(c.path.as_str()) {
+            if let Some(d) = snapshot.diffs.get(&c.path) {
+                parts.push(d.clone());
+            }
+        } else if let Some(selected) = partial.get(&c.path)
+            && let Some(hunks) = snapshot.hunks.get(&c.path)
+        {
+            let mut text = format!("diff --git a/{p} b/{p} (selected hunks)\n", p = c.path);
+            for &k in selected {
+                if let Some(h) = hunks.get(k) {
+                    text.push_str(&h.text);
+                }
+            }
+            parts.push(text);
+        }
+    }
+    parts.join("\n")
 }
 
 /// The Conventional Commits types offered by the picker (and recognised by

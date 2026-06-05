@@ -309,11 +309,13 @@ pub(crate) fn items_of(tree: &TreeModel, nodes: &[Node]) -> Vec<TreeItem<'static
         .iter()
         .map(|node| {
             let line = node_line(tree, node);
-            if node.is_dir() {
+            if node.children.is_empty() {
+                TreeItem::new_leaf(node.id(), line)
+            } else {
+                // Dirs — and files with hunk children (collapsed by default;
+                // `→` folds them open for hunk-level marking).
                 TreeItem::new(node.id(), line, items_of(tree, &node.children))
                     .expect("node identifiers are unique")
-            } else {
-                TreeItem::new_leaf(node.id(), line)
             }
         })
         .collect()
@@ -344,6 +346,13 @@ fn node_line(tree: &TreeModel, node: &Node) -> Line<'static> {
                 Style::default().fg(color),
             ));
             spans.push(Span::raw(node.label.clone()));
+        }
+        NodeKind::Hunk { .. } => {
+            // The label is the `@@ -a,b +c,d @@ section` header.
+            spans.push(Span::styled(
+                node.label.clone(),
+                Style::default().fg(Color::Cyan),
+            ));
         }
     }
     Line::from(spans)
@@ -390,6 +399,24 @@ pub(crate) fn build_detail(
             let lines: Vec<Line<'static>> =
                 node.children.iter().map(|c| node_line(tree, c)).collect();
             (format!(" {}/ ", node.path), Text::from(lines))
+        }
+        NodeKind::Hunk { hunk_index, .. } => {
+            let path = node.path.as_str();
+            let total = snapshot.hunks.get(path).map_or(0, Vec::len);
+            let key = node.id(); // "path#k" — distinct from the file's cache entry
+            if !cache.contains_key(&key) {
+                let text = snapshot
+                    .hunks
+                    .get(path)
+                    .and_then(|hs| hs.get(*hunk_index))
+                    .map(|h| h.text.as_str())
+                    .unwrap_or("");
+                cache.insert(key.clone(), highlighter.render(path, text));
+            }
+            (
+                format!(" {path} — hunk {}/{total} ", hunk_index + 1),
+                cache.get(&key).cloned().unwrap_or_default(),
+            )
         }
     }
 }

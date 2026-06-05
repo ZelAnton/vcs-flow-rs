@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use vcs_github::{GitHub, GitHubAt};
@@ -32,6 +32,73 @@ struct OpenPr {
     #[serde(rename = "baseRefName")]
     base: String,
     url: String,
+    /// CI rollup. Absent in older payloads → empty (no checks line printed).
+    #[serde(rename = "statusCheckRollup", default)]
+    checks: Vec<Check>,
+}
+
+/// One rollup entry. The array is heterogeneous: a CheckRun carries
+/// `status`/`conclusion`, a commit StatusContext carries `state` — model all
+/// three (defaulted) and let [`check_bucket`] pick whichever is filled.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct Check {
+    state: String,
+    status: String,
+    conclusion: String,
+}
+
+/// Classify one rollup entry: passed / failed / still pending.
+fn check_bucket(c: &Check) -> CheckBucket {
+    // CheckRun: `conclusion` is empty until `status` reaches COMPLETED.
+    let verdict = if !c.conclusion.is_empty() {
+        c.conclusion.as_str()
+    } else if !c.state.is_empty() {
+        c.state.as_str() // StatusContext
+    } else {
+        c.status.as_str() // an unfinished CheckRun (QUEUED / IN_PROGRESS)
+    };
+    match verdict {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => CheckBucket::Pass,
+        "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            CheckBucket::Fail
+        }
+        _ => CheckBucket::Pending,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CheckBucket {
+    Pass,
+    Fail,
+    Pending,
+}
+
+/// `checks: ✓3 ✗1 ●2` summary (zero buckets omitted); `None` when there are no
+/// checks at all.
+fn checks_line(checks: &[Check]) -> Option<String> {
+    if checks.is_empty() {
+        return None;
+    }
+    let (mut pass, mut fail, mut pending) = (0, 0, 0);
+    for c in checks {
+        match check_bucket(c) {
+            CheckBucket::Pass => pass += 1,
+            CheckBucket::Fail => fail += 1,
+            CheckBucket::Pending => pending += 1,
+        }
+    }
+    let mut parts = Vec::new();
+    if pass > 0 {
+        parts.push(format!("✓{pass}"));
+    }
+    if fail > 0 {
+        parts.push(format!("✗{fail}"));
+    }
+    if pending > 0 {
+        parts.push(format!("●{pending}"));
+    }
+    Some(format!("checks: {}", parts.join(" ")))
 }
 
 /// Run the PR step after a successful push of `remote_branch`. Errors that
@@ -73,11 +140,58 @@ pub async fn after_push(backend: &Backend, remote_branch: &str) -> AppResult<()>
         for pr in &prs {
             println!("  #{} {}  → {}", pr.number, pr.title, pr.base);
             println!("      {}", osc8(&pr.url));
+            if let Some(line) = checks_line(&pr.checks) {
+                println!("      {line}");
+            }
         }
+        offer_open_in_browser(backend, &prs)?;
         return Ok(());
     }
 
     create_pr_flow(backend, remote_branch, default_base(&repo)).await
+}
+
+/// Offer to open one of the listed PRs in the browser (`gh pr view --web`).
+/// One PR → yes/no; several → enter the PR number (Enter skips).
+fn offer_open_in_browser(backend: &Backend, prs: &[OpenPr]) -> AppResult<()> {
+    let number = if let [only] = prs {
+        if !crate::prompt::confirm_no("Open it in the browser?")? {
+            return Ok(());
+        }
+        only.number
+    } else {
+        print!("Open one in the browser? Enter its number (or just Enter to skip): #");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line)? == 0 {
+            println!();
+            return Ok(());
+        }
+        let Ok(n) = line.trim().trim_start_matches('#').parse::<u64>() else {
+            return Ok(()); // blank or not a number → skip
+        };
+        if !prs.iter().any(|p| p.number == n) {
+            println!("No PR #{n} in the list.");
+            return Ok(());
+        }
+        n
+    };
+    // std spawn, not processkit: a kill-on-close job would also kill a freshly
+    // launched browser the moment `gh` exits (same reasoning as `create_pr`).
+    let out = std::process::Command::new("gh")
+        .args(["pr", "view", &number.to_string(), "--web"])
+        .current_dir(backend.root())
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            dim(&format!("could not open the PR: {}", err.trim()));
+        }
+        Err(e) => dim(&format!("could not open the PR: {e}")),
+    }
+    Ok(())
 }
 
 /// All open PRs with head = `head`, into any base. Any failure (including
@@ -95,7 +209,7 @@ async fn open_prs_for_branch(gh: &GitHubAt<'_>, head: &str) -> Vec<OpenPr> {
         "--state",
         "open",
         "--json",
-        "number,title,baseRefName,url",
+        "number,title,baseRefName,url,statusCheckRollup",
     ]);
     match gh.run(&argv).await {
         Ok(json) => parse_open_prs(&json),
@@ -278,25 +392,36 @@ fn retain_unreverted(snap: &mut Snapshot, reverted: &[String]) {
     });
 }
 
-/// Draft title+description, let the user edit, and open the PR page in the
-/// browser with both prefilled (`gh pr create --web` launches the browser).
+/// Draft title+description (filling the repo's PR template when one exists),
+/// let the user edit, optionally mark as draft, and open the PR page in the
+/// browser with everything prefilled (`gh pr create --web` launches the browser).
 async fn create_pr(backend: &Backend, head: &str, base: &str) -> AppResult<()> {
     let diff = backend.review_diff_text(base, head).await?;
     if diff.trim().is_empty() {
         println!("'{head}' has no changes against '{base}' — nothing to open a PR for.");
         return Ok(());
     }
+    // gh's own template auto-fill is bypassed when `--body` is given, so the
+    // template must be folded into our draft instead.
+    let template = find_pr_template(backend.root());
 
     let edited = {
         let (mut tui, _guard) = ui::terminal::TerminalGuard::enter()?;
-        // Fall back to the branch name as a minimal title if drafting is
-        // skipped or fails — the user edits it next anyway.
+        // Fallback when drafting is skipped or fails: the branch name as a
+        // minimal title, plus the raw template (if any) to fill by hand.
+        let fallback = match &template {
+            Some(t) => format!("{head}\n\n{t}"),
+            None => head.to_string(),
+        };
         let draft = ai_loop::draft_with_retry(
             &mut tui,
             backend.root(),
-            ai_loop::Draft::Pr { diff: &diff },
+            ai_loop::Draft::Pr {
+                diff: &diff,
+                template: template.as_deref(),
+            },
             "Generating PR title and description…",
-            head,
+            &fallback,
         )
         .await?;
         let header = format!("Pull request — {head} → {base}  (first line = title)");
@@ -312,16 +437,21 @@ async fn create_pr(backend: &Backend, head: &str, base: &str) -> AppResult<()> {
         return Ok(());
     }
 
+    let draft_pr = crate::prompt::confirm_no("Open it as a draft PR?")?;
+
     println!("Opening the PR page in your browser…");
     // Deliberately NOT processkit here: its kill-on-close job would also kill a
     // freshly-spawned browser (a descendant of `gh`) the moment `gh` exits. A
     // plain std spawn leaves the browser alive; `gh … --web` itself returns as
     // soon as the page is launched, so the brief blocking wait is fine.
+    let mut argv = vec![
+        "pr", "create", "--web", "--head", head, "--base", base, "--title", &title, "--body", &body,
+    ];
+    if draft_pr {
+        argv.push("--draft");
+    }
     let out = std::process::Command::new("gh")
-        .args([
-            "pr", "create", "--web", "--head", head, "--base", base, "--title", &title, "--body",
-            &body,
-        ])
+        .args(&argv)
         .current_dir(backend.root())
         .stdin(std::process::Stdio::null())
         .output();
@@ -338,10 +468,40 @@ async fn create_pr(backend: &Backend, head: &str, base: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Parse the `gh pr list --json number,title,baseRefName,url` output.
-/// Malformed or empty input yields an empty list.
+/// Parse the `gh pr list --json …` output. Malformed or empty input yields an
+/// empty list.
 fn parse_open_prs(json: &str) -> Vec<OpenPr> {
     serde_json::from_str(json).unwrap_or_default()
+}
+
+/// The repository's PR template, from the locations GitHub itself recognises
+/// (`.github/`, the root, `docs/` — any case of `pull_request_template.md`),
+/// capped to keep the AI prompt within bounds. `None` when there is none.
+fn find_pr_template(root: &Path) -> Option<String> {
+    const CAP: usize = 4096;
+    for dir in [root.join(".github"), root.to_path_buf(), root.join("docs")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.eq_ignore_ascii_case("pull_request_template.md")
+                && let Ok(text) = std::fs::read_to_string(entry.path())
+            {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let mut end = trimmed.len().min(CAP);
+                while !trimmed.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return Some(trimmed[..end].to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Wrap `url` in an OSC 8 hyperlink (clickable in Windows Terminal and most
@@ -434,17 +594,76 @@ mod tests {
             {"number": 12, "title": "Fix login", "baseRefName": "main",
              "url": "https://github.com/o/r/pull/12"},
             {"number": 34, "title": "Docs", "baseRefName": "develop",
-             "url": "https://github.com/o/r/pull/34"}
+             "url": "https://github.com/o/r/pull/34",
+             "statusCheckRollup": [
+                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"__typename": "StatusContext", "state": "PENDING"}
+             ]}
         ]"#;
         let prs = parse_open_prs(json);
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0].number, 12);
         assert_eq!(prs[0].base, "main");
+        // Absent rollup → empty checks (older gh payloads keep parsing).
+        assert!(prs[0].checks.is_empty());
         assert_eq!(prs[1].title, "Docs");
+        assert_eq!(prs[1].checks.len(), 2);
         // Empty list, malformed JSON, and wrong shapes all read as "no PRs".
         assert!(parse_open_prs("[]").is_empty());
         assert!(parse_open_prs("not json").is_empty());
         assert!(parse_open_prs(r#"{"number": 1}"#).is_empty());
+    }
+
+    #[test]
+    fn checks_line_buckets_heterogeneous_rollup() {
+        let check = |state: &str, status: &str, conclusion: &str| Check {
+            state: state.into(),
+            status: status.into(),
+            conclusion: conclusion.into(),
+        };
+        // CheckRun finished OK / failed; unfinished CheckRun; StatusContexts.
+        let checks = vec![
+            check("", "COMPLETED", "SUCCESS"),
+            check("", "COMPLETED", "FAILURE"),
+            check("", "IN_PROGRESS", ""),
+            check("SUCCESS", "", ""),
+            check("PENDING", "", ""),
+            check("", "COMPLETED", "SKIPPED"), // neutral-ish → pass bucket
+        ];
+        assert_eq!(checks_line(&checks).unwrap(), "checks: ✓3 ✗1 ●2");
+        // Zero buckets are omitted; no checks at all → no line.
+        assert_eq!(
+            checks_line(&[check("", "COMPLETED", "SUCCESS")]).unwrap(),
+            "checks: ✓1"
+        );
+        assert!(checks_line(&[]).is_none());
+    }
+
+    #[test]
+    fn finds_pr_template_case_insensitively_with_github_dir_priority() {
+        let root = std::env::temp_dir().join(format!("vcs-flow-prt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".github")).unwrap();
+        // No template anywhere → None.
+        assert!(find_pr_template(&root).is_none());
+        // Root-level template (odd case) is found…
+        std::fs::write(root.join("PULL_REQUEST_TEMPLATE.md"), "## Root").unwrap();
+        assert_eq!(find_pr_template(&root).unwrap(), "## Root");
+        // …but `.github/` wins when both exist (checked first).
+        std::fs::write(
+            root.join(".github").join("pull_request_template.md"),
+            "## GH",
+        )
+        .unwrap();
+        assert_eq!(find_pr_template(&root).unwrap(), "## GH");
+        // Blank template counts as absent (falls through to the root one).
+        std::fs::write(
+            root.join(".github").join("pull_request_template.md"),
+            "  \n",
+        )
+        .unwrap();
+        assert_eq!(find_pr_template(&root).unwrap(), "## Root");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -469,6 +688,7 @@ mod tests {
                 },
             ],
             diffs: Default::default(),
+            hunks: Default::default(),
         };
         // `selected_paths` emits both sides of a rename; either must match.
         retain_unreverted(&mut snap, &["a.rs".into(), "old.rs".into()]);

@@ -67,9 +67,10 @@ pub async fn generate(diff: &str, existing: &str, model: &str, conventional: boo
     run_copilot(&build_commit_prompt(diff, existing, conventional), model).await
 }
 
-/// Draft a PR title (first line) + markdown body from the branch-vs-base `diff`.
-pub async fn generate_pr(diff: &str, model: &str) -> Outcome {
-    run_copilot(&build_pr_prompt(diff), model).await
+/// Draft a PR title (first line) + markdown body from the branch-vs-base
+/// `diff`, optionally filling in the repository's PR `template`.
+pub async fn generate_pr(diff: &str, model: &str, template: Option<&str>) -> Outcome {
+    run_copilot(&build_pr_prompt(diff, template), model).await
 }
 
 /// Run one copilot attempt for `prompt` and classify the result.
@@ -145,9 +146,27 @@ fn build_commit_prompt(diff: &str, existing: &str, conventional: bool) -> String
     prompt
 }
 
-/// Assemble the PR title+description prompt: preamble, then the (truncated) diff.
-fn build_pr_prompt(diff: &str) -> String {
-    format!("{PR_PROMPT_PREAMBLE}\n\n{}", truncate(diff, DIFF_LIMIT))
+/// Cap a PR template embedded in the prompt — same rationale as
+/// [`CONTEXT_LIMIT`]: a hint, not the payload, and the whole `-p` argument must
+/// stay under the OS command-line limit.
+const TEMPLATE_LIMIT: usize = 4000;
+
+/// Assemble the PR title+description prompt: preamble, the repo's PR template
+/// to fill in (when present), then the (truncated) diff.
+fn build_pr_prompt(diff: &str, template: Option<&str>) -> String {
+    let mut prompt = String::from(PR_PROMPT_PREAMBLE);
+    if let Some(t) = template
+        && !t.trim().is_empty()
+    {
+        prompt.push_str(
+            "\n\nThe description must fill in this PR template (keep its headings; \
+             replace placeholders and comments with real content):\n",
+        );
+        prompt.push_str(&truncate(t.trim(), TEMPLATE_LIMIT));
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(&truncate(diff, DIFF_LIMIT));
+    prompt
 }
 
 /// Truncate on a char boundary at or below `limit`, appending a marker so the
@@ -210,14 +229,26 @@ mod tests {
 
     #[test]
     fn pr_prompt_is_preamble_plus_truncated_diff() {
-        let p = build_pr_prompt("diff body");
+        let p = build_pr_prompt("diff body", None);
         assert!(p.starts_with(PR_PROMPT_PREAMBLE));
         assert!(p.ends_with("diff body"));
         // No commit-only context block sneaks in.
         assert!(!p.contains("Current draft description"));
+        assert!(!p.contains("PR template"));
         // The diff cap applies here too.
         let long = "x".repeat(DIFF_LIMIT + 100);
-        assert!(build_pr_prompt(&long).ends_with("... (truncated)"));
+        assert!(build_pr_prompt(&long, None).ends_with("... (truncated)"));
+    }
+
+    #[test]
+    fn pr_prompt_embeds_template_when_present() {
+        let p = build_pr_prompt("diff body", Some("## Summary\n<!-- what -->"));
+        assert!(p.contains("PR template"));
+        assert!(p.contains("## Summary"));
+        assert!(p.ends_with("diff body"));
+        // A blank template is treated as absent.
+        let blank = build_pr_prompt("diff body", Some("   "));
+        assert!(!blank.contains("PR template"));
     }
 
     #[test]
