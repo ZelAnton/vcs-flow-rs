@@ -253,7 +253,15 @@ async fn review_loop(
                         }
                     }
                     Err(e) => {
-                        eprintln!("Revert failed (nothing was changed): {e}");
+                        // `git apply` is atomic — a failure leaves every file as
+                        // it was. The usual cause: a marked file also carries
+                        // uncommitted local edits, so the patch context no
+                        // longer matches the working tree.
+                        eprintln!(
+                            "Revert failed (nothing was changed): {e}\n\
+                             (uncommitted local edits in a marked file can \
+                             prevent the revert — commit or stash them first)"
+                        );
                         return Ok(());
                     }
                 }

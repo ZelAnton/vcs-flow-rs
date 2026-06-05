@@ -137,6 +137,12 @@ async fn integrate_with_pause(
     loop {
         match state {
             Integration::Clean => return Ok(true),
+            // A dead-end the tool can't drive further — same graceful stop as
+            // the other push-flow bail-outs (the commit already succeeded).
+            Integration::Unresolved(msg) => {
+                println!("{msg} Nothing pushed.");
+                return Ok(false);
+            }
             Integration::Conflicts(files) => {
                 println!("\nConflicts in {} file(s):", files.len());
                 for f in &files {

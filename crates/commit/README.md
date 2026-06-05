@@ -325,9 +325,9 @@ Marks start **cleared** here: check files or folders you want to *undo*, then
 press `r` and confirm. `commit` then:
 
 1. **Backs up first** — the exact patch being undone is written to
-   `<temp>/vcs-flow-commit/revert-<stamp>.patch` (e.g. `%TEMP%\vcs-flow-commit\`
-   on Windows). If you reverted by mistake, re-apply it from the repo root with
-   `git apply <file>`.
+   `<temp>/vcs-flow-commit/revert-<unix-millis>-<n>.patch` (e.g.
+   `%TEMP%\vcs-flow-commit\` on Windows). If you reverted by mistake, re-apply
+   it from the repo root with `git apply <file>`.
 2. **Reverts in the working copy only** — the marked files' content returns to
    the base-branch (merge-base) state: files the branch added are deleted, ones
    it deleted come back, edits and renames are undone. The pushed branch itself
@@ -336,6 +336,10 @@ press `r` and confirm. `commit` then:
 
 Reverted files disappear from the review list for the session, and on the way
 out the step prints a reminder with the backup path(s).
+
+The revert is **all-or-nothing** (`git apply` is atomic): if a marked file also
+carries *uncommitted* local edits, the patch no longer matches and the whole
+revert fails with nothing changed — commit or stash those edits first.
 
 ## Behavior & edge cases
 

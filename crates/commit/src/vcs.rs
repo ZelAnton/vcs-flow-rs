@@ -36,6 +36,10 @@ pub enum Integration {
     Clean,
     /// Conflicts remain in these (repo-relative) paths; the user must resolve them.
     Conflicts(Vec<String>),
+    /// Integration can't proceed automatically and wasn't completed — the user
+    /// must finish it by hand; nothing should be pushed. Not an *error*: the
+    /// commit itself succeeded, so the caller reports this and stops cleanly.
+    Unresolved(String),
 }
 
 /// The changed files plus a per-file unified diff, captured once at startup.
@@ -454,10 +458,24 @@ impl Backend {
                     // `rebase_continue` suppresses the editor.
                     let advanced = g.rebase_continue().await.is_ok();
                     if advanced && !g.is_rebase_in_progress().await? {
-                        Ok(Integration::Clean)
-                    } else {
-                        Ok(Integration::Conflicts(self.git_conflicted_files().await?))
+                        return Ok(Integration::Clean);
                     }
+                    let files = self.git_conflicted_files().await?;
+                    if files.is_empty() {
+                        // Didn't advance, yet nothing is unmerged — e.g. a
+                        // resolution left an empty patch (git wants `--skip`),
+                        // or the rebase was finished/aborted outside the tool.
+                        // Re-prompting with "0 conflicts" would loop forever;
+                        // hand it to the user instead (gracefully — the commit
+                        // itself succeeded, so this must not exit non-zero).
+                        return Ok(Integration::Unresolved(
+                            "The rebase did not advance and no conflicted files remain — \
+                             finish it manually (git rebase --skip / --continue / --abort) \
+                             and push yourself."
+                                .into(),
+                        ));
+                    }
+                    Ok(Integration::Conflicts(files))
                 }
             }
         } else if let Some(j) = self.repo.jj_at() {

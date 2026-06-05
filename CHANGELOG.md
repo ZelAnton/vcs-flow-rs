@@ -51,9 +51,9 @@ to a dated version section.
   → built-in default `gpt-5.4-mini`.
 
 ### Changed
-- Raised MSRV to 1.88 (required by the `processkit` dependency).
-- Upgraded to `processkit` 0.6, `vcs-core` 0.2, and `vcs-git`/`vcs-jj`/`vcs-github`
-  0.4, and adopted the new toolkit surface: `commit`'s `vcs` backend wraps
+- MSRV is 1.88 (required by the `processkit` dependency).
+- Builds on `processkit` 0.6, `vcs-core` 0.2, and `vcs-git`/`vcs-jj`/`vcs-github`
+  0.4, adopting the typed toolkit surface: `commit`'s `vcs` backend wraps
   `vcs_core::Repo` (detection via `vcs_core::detect`) and drives it through the
   cwd-bound `repo.git_at()`/`repo.jj_at()` typed views. The hand-rolled unified-diff
   parser is replaced by typed `diff()` → `FileDiff` (inheriting the toolkit's rename
