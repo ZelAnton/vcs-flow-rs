@@ -1335,6 +1335,33 @@ mod tests {
         assert!(run(&["diff", "--cached", "--name-only"]).trim().is_empty());
         assert_eq!(run(&["diff", "--name-only"]).trim(), "f.txt");
 
+        // Amend the remaining hunk into the tip: same plumbing with the tip's
+        // own parents (`log --format=%P`) and the CAS update-ref.
+        let backend = Backend::open(&dir).unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        let remaining = snap.hunks.get("f.txt").map_or(1, Vec::len);
+        assert_eq!(remaining, 1, "one hunk left after the partial commit");
+        // A single remaining hunk gets no hunk children, so amend it via a
+        // partial selection built by hand (exercises the amend path directly).
+        backend
+            .commit(
+                &[],
+                &[("f.txt".into(), vec![0])],
+                "partial amended",
+                true,
+                &Target {
+                    label: "main".into(),
+                    revision: None,
+                },
+            )
+            .await
+            .unwrap();
+        let amended = run(&["show", "HEAD:f.txt"]);
+        assert!(amended.contains("START") && amended.contains("END"));
+        assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "partial amended");
+        assert_eq!(run(&["rev-list", "--count", "HEAD"]).trim(), "2"); // base + 1
+        assert!(run(&["status", "--porcelain"]).trim().is_empty());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

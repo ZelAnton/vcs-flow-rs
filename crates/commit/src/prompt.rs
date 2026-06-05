@@ -9,7 +9,7 @@ pub fn confirm(question: &str) -> crate::AppResult<bool> {
     let Some(answer) = ask(question, "[Y/n]")? else {
         return Ok(false); // EOF → decline
     };
-    Ok(answer.is_empty() || answer.eq_ignore_ascii_case("y"))
+    Ok(answer.is_empty() || answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
 /// `[y/N]` prompt, default **no** (Enter declines) — for the destructive or

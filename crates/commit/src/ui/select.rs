@@ -403,7 +403,7 @@ pub(crate) fn build_detail(
         NodeKind::Hunk { hunk_index, .. } => {
             let path = node.path.as_str();
             let total = snapshot.hunks.get(path).map_or(0, Vec::len);
-            let key = node.id(); // "path#k" — distinct from the file's cache entry
+            let key = node.id(); // "path\0k" — can't collide with any file's cache entry
             if !cache.contains_key(&key) {
                 let text = snapshot
                     .hunks

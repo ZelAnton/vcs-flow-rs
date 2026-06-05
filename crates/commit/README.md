@@ -279,7 +279,9 @@ for a colocated git repo, or a `.gitignore` entry for a worktree / pure-jj repo.
   stay in the working tree for a later commit. Two limits of that plumbing
   path: git **commit hooks** and **`commit.gpgsign`** are skipped — keep
   selections whole-file where those matter. An amend keeps all of the tip's
-  parents (amending a merge is safe).
+  parents (amending a merge is safe). After the commit, the index entries of
+  the *committed* paths are refreshed to the new tip (anything you had staged
+  for those paths is superseded; staged content for other paths is untouched).
 - **jj** — finalizes a commit containing the selected paths and advances the
   nearest bookmark onto it; deselected changes stay in the working copy. If
   several bookmarks are equally near, you pick one first. **Amend** squashes the

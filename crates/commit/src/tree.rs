@@ -57,14 +57,16 @@ impl Node {
     /// Tree-widget identifier — must be unique even when a tracked file and a
     /// directory share a path (a file replaced by a same-named directory, with
     /// the new entry staged). Directories get a trailing slash; files don't;
-    /// hunks append `#<index>` to their file's id (`#` can't collide with the
-    /// other shapes — a path named `x#1` yields a *file* id `x#1`, but its
-    /// hypothetical hunks would be `x#1#0`, still unique).
+    /// hunks append `\0<index>` to their file's id. NUL as the separator
+    /// because it is the one byte git forbids in paths — a `#`-style separator
+    /// would collide with a real file named `x#0` next to a hunk-split `x`,
+    /// silently mis-targeting toggles and the diff pane. The id is only ever a
+    /// widget identifier / lookup / cache key, never shown or passed to git.
     pub fn id(&self) -> String {
         match &self.kind {
             NodeKind::Dir => format!("{}/", self.path),
             NodeKind::File { .. } => self.path.clone(),
-            NodeKind::Hunk { hunk_index, .. } => format!("{}#{hunk_index}", self.path),
+            NodeKind::Hunk { hunk_index, .. } => format!("{}\u{0}{hunk_index}", self.path),
         }
     }
 }
@@ -267,13 +269,13 @@ impl TreeModel {
                     return Some(n);
                 }
                 // A dir id ends with `/`, so `id` under it starts with `nid`;
-                // a hunk id is its file's id plus `#<k>`.
+                // a hunk id is its file's id plus `\0<k>`.
                 let descend = match &n.kind {
                     NodeKind::Dir => id.starts_with(&nid),
                     NodeKind::File { .. } => {
                         !n.children.is_empty()
                             && id.starts_with(&nid)
-                            && id[nid.len()..].starts_with('#')
+                            && id[nid.len()..].starts_with('\u{0}')
                     }
                     NodeKind::Hunk { .. } => false,
                 };
@@ -614,7 +616,7 @@ mod tests {
                 hunk_index: 1
             }
         ));
-        assert_eq!(a.children[1].id(), "src/a.rs#1");
+        assert_eq!(a.children[1].id(), "src/a.rs\u{0}1");
     }
 
     #[test]
@@ -628,7 +630,7 @@ mod tests {
         assert_eq!(t.selected_whole_paths(&c).len(), 2);
 
         // Drop one hunk: the file (and the dir above) turn partial.
-        t.toggle("src/a.rs#1");
+        t.toggle("src/a.rs\u{0}1");
         let a = t.find("src/a.rs").unwrap().clone();
         assert_eq!(t.state_of(&a), SelectState::Partial);
         assert_eq!(t.state_of(&t.roots[0].clone()), SelectState::Partial);
@@ -652,12 +654,35 @@ mod tests {
         assert_eq!(t.selected_count(), 1);
 
         // A single selected hunk: partial again; hunk node states differ.
-        t.toggle("src/a.rs#2");
-        let on = t.find("src/a.rs#2").unwrap().clone();
-        let off = t.find("src/a.rs#0").unwrap().clone();
+        t.toggle("src/a.rs\u{0}2");
+        let on = t.find("src/a.rs\u{0}2").unwrap().clone();
+        let off = t.find("src/a.rs\u{0}0").unwrap().clone();
         assert_eq!(t.state_of(&on), SelectState::All);
         assert_eq!(t.state_of(&off), SelectState::None);
         assert_eq!(t.selected_partial(&c), vec![("src/a.rs".into(), vec![2])]);
+    }
+
+    #[test]
+    fn hunk_ids_cannot_collide_with_hash_named_files() {
+        // A real file literally named `x#0` next to a hunk-split `x`: with a
+        // `#` separator the hunk id would equal the file id and `find` would
+        // mis-target. The NUL separator keeps them distinct.
+        let c = changes(&["x", "x#0"]);
+        let mut t = TreeModel::build(&c);
+        t.with_hunks(&c, &hunk_map("x", 2));
+        assert!(matches!(
+            t.find("x#0").unwrap().kind,
+            NodeKind::File { index: 1, .. }
+        ));
+        assert!(matches!(
+            t.find("x\u{0}0").unwrap().kind,
+            NodeKind::Hunk { hunk_index: 0, .. }
+        ));
+        // Toggling the file doesn't touch the hunk-split sibling.
+        t.toggle("x#0");
+        let x = t.find("x").unwrap().clone();
+        assert_eq!(t.state_of(&x), SelectState::All);
+        assert_eq!(t.selected_count(), 1);
     }
 
     #[test]
@@ -665,7 +690,7 @@ mod tests {
         let c = changes(&["src/a.rs", "docs/x.md"]);
         let mut t = TreeModel::build(&c);
         t.with_hunks(&c, &hunk_map("src/a.rs", 2));
-        t.toggle("src/a.rs#0");
+        t.toggle("src/a.rs\u{0}0");
         // Narrow to src/ and back — children and hunk marks survive.
         t.rebuild_view(&c, &[0]);
         assert_eq!(t.find("src/a.rs").unwrap().children.len(), 2);
