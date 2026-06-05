@@ -222,7 +222,8 @@ fn header_line(
 }
 
 /// Build tree-widget items from the model, styling checkboxes and file glyphs.
-fn items_of(tree: &TreeModel, nodes: &[Node]) -> Vec<TreeItem<'static, String>> {
+/// (`pub(crate)`: the PR diff-review screen renders the same tree rows.)
+pub(crate) fn items_of(tree: &TreeModel, nodes: &[Node]) -> Vec<TreeItem<'static, String>> {
     nodes
         .iter()
         .map(|node| {
@@ -277,7 +278,7 @@ fn glyph_style(kind: ChangeKind) -> (char, Color) {
 }
 
 /// Right-pane content: a file's highlighted diff, or a folder's child listing.
-fn build_detail(
+pub(crate) fn build_detail(
     tree: &TreeModel,
     snapshot: &Snapshot,
     highlighter: &Highlighter,
@@ -312,7 +313,7 @@ fn build_detail(
 }
 
 /// All directory identifier-chains, used to expand the whole tree at startup.
-fn open_chains(nodes: &[Node]) -> Vec<Vec<String>> {
+pub(crate) fn open_chains(nodes: &[Node]) -> Vec<Vec<String>> {
     fn walk(nodes: &[Node], prefix: &[String], out: &mut Vec<Vec<String>>) {
         for node in nodes {
             let mut chain = prefix.to_vec();

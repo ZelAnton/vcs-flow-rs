@@ -57,6 +57,9 @@ clap = { version = "4", features = ["derive"] }
 # (e.g. the AI model name `commit` persists). Derive for the settings struct.
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# JSON parsing for the raw `gh … --json` escape-hatch queries (e.g. `commit`'s
+# open-PR-for-branch lookup, which vcs-github doesn't model).
+serde_json = "1"
 # Cross-platform per-user config directory (`%APPDATA%` / `$XDG_CONFIG_HOME` /
 # `~/Library/Application Support`) for the user-level settings file.
 dirs = "6"

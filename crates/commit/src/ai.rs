@@ -1,11 +1,11 @@
-//! AI commit-message drafting via the GitHub Copilot CLI (`copilot`).
+//! AI drafting via the GitHub Copilot CLI (`copilot`): commit messages
+//! ([`generate`]) and PR titles + descriptions ([`generate_pr`]).
 //!
-//! The selected-files diff (plus any existing jj change description, used as
-//! context) is handed to `copilot -p … -s` in non-interactive mode; its stdout
-//! becomes the editor's pre-fill. The result is an [`Outcome`] so the caller can
+//! The diff (plus, for commits, any existing jj change description as context)
+//! is handed to `copilot -p … -s` in non-interactive mode; its stdout becomes
+//! the editor's pre-fill. The result is an [`Outcome`] so the caller can
 //! distinguish "the chosen model isn't available" (worth re-prompting for another)
-//! from any other failure (silently fall back to the existing description) — a
-//! commit is never blocked.
+//! from any other failure (silently fall back) — a commit or PR is never blocked.
 
 use std::time::Duration;
 
@@ -46,11 +46,28 @@ First line: imperative mood, max 72 chars.
 If more context is needed, add a body after a blank line.
 Output ONLY the raw commit message text. No markdown, no quotes, no prefixes.";
 
+/// The instruction block for a PR title + description. Unlike the commit
+/// preamble it *invites* markdown — that's what the PR body renders as.
+const PR_PROMPT_PREAMBLE: &str = "\
+Write a GitHub pull request title and description for this branch diff.
+First line: a concise title in imperative mood, max 72 chars.
+Then a blank line, then a markdown description: summarize WHAT changed and WHY,
+with bullet points for the notable changes. NEVER enumerate every file.
+Output ONLY the title and the description. Do not wrap the answer in code fences.";
+
 /// Draft a commit message from `diff` with `model`, optionally seeded with the
 /// `existing` description (the jj `@` change description) as context.
 pub async fn generate(diff: &str, existing: &str, model: &str) -> Outcome {
-    let prompt = build_prompt(diff, existing);
+    run_copilot(&build_commit_prompt(diff, existing), model).await
+}
 
+/// Draft a PR title (first line) + markdown body from the branch-vs-base `diff`.
+pub async fn generate_pr(diff: &str, model: &str) -> Outcome {
+    run_copilot(&build_pr_prompt(diff), model).await
+}
+
+/// Run one copilot attempt for `prompt` and classify the result.
+async fn run_copilot(prompt: &str, model: &str) -> Outcome {
     // No `--allow-all-tools`: this is pure text generation; copilot needs no
     // file or tool access. `output_string` captures output without raising on a
     // non-zero exit, so we can classify the failure ourselves. `--model=<v>` (not
@@ -58,7 +75,7 @@ pub async fn generate(diff: &str, existing: &str, model: &str) -> Outcome {
     let result = Command::new("copilot")
         .args([
             "-p",
-            &prompt,
+            prompt,
             "-s",
             "--no-auto-update",
             "--effort",
@@ -102,9 +119,9 @@ fn is_model_unavailable(stderr: &str) -> bool {
     lower.contains("model") && lower.contains("not available")
 }
 
-/// Assemble the copilot prompt: preamble, the existing description as context
-/// (when present), then the (truncated) diff.
-fn build_prompt(diff: &str, existing: &str) -> String {
+/// Assemble the commit-message prompt: preamble, the existing description as
+/// context (when present), then the (truncated) diff.
+fn build_commit_prompt(diff: &str, existing: &str) -> String {
     let mut prompt = String::from(PROMPT_PREAMBLE);
     let existing = existing.trim();
     if !existing.is_empty() {
@@ -116,6 +133,11 @@ fn build_prompt(diff: &str, existing: &str) -> String {
     prompt.push_str("\n\n");
     prompt.push_str(&truncate(diff, DIFF_LIMIT));
     prompt
+}
+
+/// Assemble the PR title+description prompt: preamble, then the (truncated) diff.
+fn build_pr_prompt(diff: &str) -> String {
+    format!("{PR_PROMPT_PREAMBLE}\n\n{}", truncate(diff, DIFF_LIMIT))
 }
 
 /// Truncate on a char boundary at or below `limit`, appending a marker so the
@@ -154,7 +176,7 @@ mod tests {
 
     #[test]
     fn prompt_includes_existing_description_as_context() {
-        let p = build_prompt("diff body", "  WIP: refactor parser  ");
+        let p = build_commit_prompt("diff body", "  WIP: refactor parser  ");
         assert!(p.starts_with(PROMPT_PREAMBLE));
         assert!(p.contains("Current draft description"));
         assert!(p.contains("WIP: refactor parser"));
@@ -163,9 +185,21 @@ mod tests {
 
     #[test]
     fn prompt_omits_description_block_when_empty() {
-        let p = build_prompt("diff body", "   ");
+        let p = build_commit_prompt("diff body", "   ");
         assert!(!p.contains("Current draft description"));
         assert!(p.ends_with("diff body"));
+    }
+
+    #[test]
+    fn pr_prompt_is_preamble_plus_truncated_diff() {
+        let p = build_pr_prompt("diff body");
+        assert!(p.starts_with(PR_PROMPT_PREAMBLE));
+        assert!(p.ends_with("diff body"));
+        // No commit-only context block sneaks in.
+        assert!(!p.contains("Current draft description"));
+        // The diff cap applies here too.
+        let long = "x".repeat(DIFF_LIMIT + 100);
+        assert!(build_pr_prompt(&long).ends_with("... (truncated)"));
     }
 
     #[test]

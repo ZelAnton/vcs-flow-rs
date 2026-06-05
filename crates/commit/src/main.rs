@@ -6,7 +6,9 @@
 //! commit. See `AGENTS.md`/`README.md` for the keybindings.
 
 mod ai;
+mod ai_loop;
 mod model;
+mod pr;
 mod push;
 mod settings;
 mod tree;
@@ -171,8 +173,21 @@ async fn interactive(
     let prefill = if amend {
         existing
     } else {
+        // The repo root is the process CWD (set in `run` so jj filesets resolve),
+        // which `settings` uses for the per-repo override file.
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let diff = selected_diff(snapshot, tree);
-        generate_message(tui, &diff, &existing).await?
+        ai_loop::draft_with_retry(
+            tui,
+            &root,
+            ai_loop::Draft::Commit {
+                diff: &diff,
+                existing: &existing,
+            },
+            "Generating commit message…",
+            &existing,
+        )
+        .await?
     };
     let Some(message) = ui::editor::run(tui, &prefill, &header)? else {
         return Ok(None);
@@ -202,85 +217,6 @@ fn selected_diff(snapshot: &Snapshot, tree: &TreeModel) -> String {
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Resolve the model, draft a message, and — if copilot rejects the model — let
-/// the user enter another (persisted to the user settings once it works). Returns
-/// the draft, or the `existing` message if generation is skipped or fails.
-///
-/// The repo root is the process CWD (set in `run` so jj filesets resolve), which
-/// `settings` uses for the per-repo override file and its git-exclude entry.
-async fn generate_message(tui: &mut Tui, diff: &str, existing: &str) -> AppResult<String> {
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    // `source` is where the originally-configured model came from; a replacement
-    // is saved back there so it isn't shadowed by a higher-precedence source.
-    let (mut model, source) = settings::resolve_model(&root);
-    let mut entered = false; // whether the current model was typed by the user
-
-    loop {
-        let Some(outcome) = run_with_spinner(tui, diff, existing, &model).await? else {
-            return Ok(existing.to_string()); // Esc during generation
-        };
-        match outcome {
-            ai::Outcome::Drafted(msg) => {
-                // Persist a newly-entered model only once it has actually worked.
-                if entered {
-                    let _ = settings::save_model(&root, source, &model); // best-effort
-                }
-                return Ok(msg);
-            }
-            ai::Outcome::ModelUnavailable => {
-                let title = format!("Model \"{model}\" is unavailable — enter another:");
-                match ui::input::run(tui, &title, "")? {
-                    Some(next) => {
-                        model = next;
-                        entered = true;
-                    }
-                    None => return Ok(existing.to_string()),
-                }
-            }
-            ai::Outcome::Failed => return Ok(existing.to_string()),
-        }
-    }
-}
-
-/// Draw the animated "Generating…" frame while one `ai::generate` attempt runs.
-/// `Ok(None)` means the user pressed Esc to skip; dropping the future kills the
-/// copilot subprocess (its job dies with the dropped handle).
-async fn run_with_spinner(
-    tui: &mut Tui,
-    diff: &str,
-    existing: &str,
-    model: &str,
-) -> AppResult<Option<ai::Outcome>> {
-    use std::time::Duration;
-
-    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-
-    let mut generate = std::pin::pin!(ai::generate(diff, existing, model));
-    let mut ticker = tokio::time::interval(Duration::from_millis(120));
-    let mut tick: usize = 0;
-
-    loop {
-        tokio::select! {
-            biased;
-            outcome = &mut generate => return Ok(Some(outcome)),
-            _ = ticker.tick() => {
-                let glyph = ui::busy::SPINNER[tick % ui::busy::SPINNER.len()];
-                ui::busy::frame(tui, glyph, "Generating commit message…")?;
-                tick = tick.wrapping_add(1);
-                // Non-blocking input drain: Esc abandons generation.
-                while event::poll(Duration::ZERO)? {
-                    if let Event::Key(key) = event::read()?
-                        && key.kind == KeyEventKind::Press
-                        && key.code == KeyCode::Esc
-                    {
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn where_to(kind: BackendKind, target: &Target) -> String {

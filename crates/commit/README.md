@@ -4,7 +4,8 @@ An interactive terminal UI for committing. Pick exactly which changed files go
 in — ignoring git's staging area entirely — preview each file's
 syntax-highlighted diff, write the message (optionally AI-drafted), and commit:
 to **git** when the repo is git-only, or to **jj** when it's a jj or colocated
-repo. After a fresh commit it can also push for you.
+repo. After a fresh commit it can also push for you — and, on a GitHub repo,
+show the branch's open pull requests or help you open a new one.
 
 Part of [vcs-flow-rs](https://github.com/ZelAnton/vcs-flow-rs). The crate is
 published as `vcs-flow-commit`; the binary it installs is `commit`.
@@ -37,6 +38,8 @@ published as `vcs-flow-commit`; the binary it installs is `commit`.
 - [Configuration](#configuration)
 - [What "commit" means per backend](#what-commit-means-per-backend)
 - [Pushing](#pushing)
+- [GitHub pull requests](#github-pull-requests)
+  - [Reviewing the branch diff (and reverting)](#reviewing-the-branch-diff-and-reverting)
 - [Behavior & edge cases](#behavior--edge-cases)
 - [How it's built](#how-its-built)
 - [License](#license)
@@ -59,6 +62,8 @@ select files in the UI and `commit` records exactly those.
 - *Optional* — the [GitHub Copilot CLI] (`copilot`) on `PATH` for AI-drafted
   messages. Without it, the editor opens on the existing message instead.
 - *Optional* — an `origin` remote, for the post-commit push flow.
+- *Optional* — the [GitHub CLI] (`gh`), authenticated (`gh auth login`), for the
+  [post-push PR step](#github-pull-requests). Without it the step is skipped.
 
 ## Install
 
@@ -155,15 +160,28 @@ aborts with `empty commit message — nothing committed`.
 | `Ctrl+Enter` or `Ctrl+S` | Commit |
 | `Esc` | Cancel |
 
-**Pickers** (bookmark target / remote branch)
+**Pickers** (bookmark target / remote branch / PR base branch)
 
 | Key | Action |
 |---|---|
 | `↑` `↓` | Move |
-| *(typing)* | Filter the list (remote-branch picker only) |
+| *(typing)* | Filter the list (branch pickers only) |
 | `Enter` | Choose the highlighted entry |
-| `Ctrl+N` | Push as a new same-named branch (remote-branch picker only) |
+| `Ctrl+N` | Push as a new same-named branch (push-target picker only) |
 | `Esc` | Cancel |
+
+**Diff review** ([PR step](#reviewing-the-branch-diff-and-reverting))
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | Move the cursor |
+| `←` `→` | Collapse / expand a folder |
+| `Space` | Mark / unmark the selected file/folder (folders cascade, tri-state) |
+| `+` / `-` | Mark all / none |
+| `PgUp` `PgDn` | Scroll the diff pane (±10 lines, clamped) |
+| `Home` | Jump the diff pane back to the top |
+| `r` | Revert the marked files (asks `y/N` first) |
+| `Esc` / `q` / `Ctrl+C` | Back to the create-PR question |
 
 > `Ctrl+Enter` needs a terminal that reports it (most modern ones do); `Ctrl+S`
 > is the universal fallback.
@@ -253,10 +271,71 @@ After a (non-amend) commit, `commit` offers to push to `origin`. On agreement it
    instead of risking a half-integration. If integration **conflicts**, `commit`
    lists the conflicted files and waits — resolve them in your own editor, press
    `Enter` to re-check and continue, or `a` to abort and roll back.
-3. **Pushes**, setting upstream when the branch was untracked.
+3. **Pushes**, setting upstream when the branch was untracked. On a GitHub repo
+   the [PR step](#github-pull-requests) follows.
 
 Amended commits are **not** auto-pushed (rewriting an already-pushed tip needs a
 manual force push, e.g. `git push --force-with-lease`).
+
+## GitHub pull requests
+
+After a **successful push**, `commit` closes the loop with GitHub. The step is
+strictly **best-effort** — it never affects the push result — and runs only when
+`origin` points at `github.com` and the authenticated [GitHub CLI] (`gh`) is on
+`PATH`; otherwise it's skipped (with at most one dim notice).
+
+**If the pushed branch already has open PRs**, they're listed — number, title,
+base branch, and a *clickable* URL (an OSC 8 hyperlink; Windows Terminal and
+most modern emulators make it a real link, others still show the address):
+
+```text
+Open pull request for 'feature/login':
+  #42 Add rate-limited sign-in  → main
+      https://github.com/you/repo/pull/42
+```
+
+**If there are none**, `commit` offers to create one:
+
+```text
+No open pull request for 'feature/login'.
+Create a pull request 'feature/login' → 'main'?  [Y]es / [n]o / [b]ase / [d]iff:
+```
+
+- The **base** defaults to the repository's default branch. `b` opens the
+  filterable branch picker to target another existing branch on `origin`.
+- `d` opens the [diff review](#reviewing-the-branch-diff-and-reverting) of the
+  branch against the current base, then re-asks.
+- `Y`/`Enter` proceeds: the PR **title + markdown description** are
+  [AI-drafted](#ai-commit-messages) from the branch-vs-base diff (same Copilot
+  machinery, spinner, `Esc` to skip, model retry); you edit the result in the
+  multi-line editor — **first line = title**, the rest (after a blank line) =
+  description. Confirming opens the GitHub **PR-creation page in your browser**
+  with both prefilled (`gh pr create --web`), so nothing is published until you
+  press the button there. An empty title aborts.
+
+### Reviewing the branch diff (and reverting)
+
+The `d` review mode shows what the PR would contain — the diff of
+`origin/<branch>` against `origin/<base>` (merge-base, exactly GitHub's view) —
+in the familiar two-pane screen: the path-compressed checkbox tree with `A`/`M`/
+`D`/`R` glyphs on the left, the selected file's highlighted diff (or a folder's
+children) on the right.
+
+Marks start **cleared** here: check files or folders you want to *undo*, then
+press `r` and confirm. `commit` then:
+
+1. **Backs up first** — the exact patch being undone is written to
+   `<temp>/vcs-flow-commit/revert-<stamp>.patch` (e.g. `%TEMP%\vcs-flow-commit\`
+   on Windows). If you reverted by mistake, re-apply it from the repo root with
+   `git apply <file>`.
+2. **Reverts in the working copy only** — the marked files' content returns to
+   the base-branch (merge-base) state: files the branch added are deleted, ones
+   it deleted come back, edits and renames are undone. The pushed branch itself
+   is **never rewritten**; commit and push the revert (with `commit`, naturally)
+   to update the branch and its future PR.
+
+Reverted files disappear from the review list for the session, and on the way
+out the step prints a reminder with the backup path(s).
 
 ## Behavior & edge cases
 
@@ -279,12 +358,15 @@ toolkit: the [`vcs-core`](https://crates.io/crates/vcs-core) facade for
 git/jj detection and dispatch, the typed
 [`vcs-git`](https://crates.io/crates/vcs-git) /
 [`vcs-jj`](https://crates.io/crates/vcs-jj) clients for the backend operations,
-and the job-backed launcher [`processkit`](https://crates.io/crates/processkit)
-(so every `git`/`jj`/`copilot` subprocess tree dies with the tool). The UI is
-built on [`ratatui`](https://crates.io/crates/ratatui) with `syntect` for diff
+the [`vcs-github`](https://crates.io/crates/vcs-github) client driving `gh` for
+the PR step, and the job-backed launcher
+[`processkit`](https://crates.io/crates/processkit) (so every
+`git`/`jj`/`gh`/`copilot` subprocess tree dies with the tool). The UI is built
+on [`ratatui`](https://crates.io/crates/ratatui) with `syntect` for diff
 highlighting.
 
 [GitHub Copilot CLI]: https://github.com/github/copilot-cli
+[GitHub CLI]: https://cli.github.com/
 
 ## License
 

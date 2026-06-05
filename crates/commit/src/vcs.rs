@@ -11,6 +11,10 @@
 //! `ProcessResult` we report on) still go through the views' `run` / `run_raw`
 //! escape hatch. `repo.cwd()` is bound to the repo root by [`Backend::open`]; `main`
 //! also sets the process cwd to the root for those raw runs.
+//!
+//! The post-push PR step adds git-only branch-vs-base operations (review diff,
+//! revert). For a jj repo the facade has no git client, so a colocated `.git`
+//! gets its own standalone `vcs_git::Git` bound at the root (`review_git`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,6 +49,11 @@ pub struct Snapshot {
 /// A git or jj repository the tool operates on, wrapping the `vcs-core` facade.
 pub struct Backend {
     repo: vcs_core::Repo,
+    /// Standalone git client for the colocated `.git` of a jj repo: for a
+    /// jj-kind `Repo` the facade's `git_at()` is `None` even when colocated,
+    /// but the branch-vs-base PR review/revert are git-only operations. `None`
+    /// for git repos (the facade's own client serves) and pure-jj repos.
+    colo_git: Option<vcs_git::Git>,
 }
 
 impl Backend {
@@ -54,9 +63,12 @@ impl Backend {
         // Bind cwd to the root so the typed views and the root-relative paths we
         // pass them agree (`open` binds cwd to `start`, which may be a subdir).
         let root = repo.root().to_path_buf();
-        Ok(Backend {
-            repo: repo.at(root),
-        })
+        let repo = repo.at(root);
+        // `.git` may be a directory or a worktree's gitdir pointer file.
+        let colo_git = (matches!(repo.kind(), vcs_core::BackendKind::Jj)
+            && repo.root().join(".git").exists())
+        .then(vcs_git::Git::new);
+        Ok(Backend { repo, colo_git })
     }
 
     pub fn root(&self) -> &Path {
@@ -509,6 +521,102 @@ impl Backend {
         }
     }
 
+    // ----- branch-vs-base review (post-push PR step) -------------------------
+
+    /// Git view for the branch-vs-base (PR) review: the repo's own client for a
+    /// git repo, or the standalone colocated client for a jj repo. `None` means
+    /// pure jj (no `.git`) — where the GitHub PR step doesn't apply either,
+    /// because `gh` needs a git directory too.
+    fn review_git(&self) -> Option<vcs_git::GitAt<'_>> {
+        self.repo
+            .git_at()
+            .or_else(|| self.colo_git.as_ref().map(|g| g.at(self.repo.root())))
+    }
+
+    /// The URL of `origin`, used to recognise a GitHub remote. `None` when the
+    /// remote (or a git working copy) is missing.
+    pub async fn remote_url(&self) -> Option<String> {
+        match self.review_git() {
+            Some(g) => g.remote_url(REMOTE).await.ok(),
+            None => None,
+        }
+    }
+
+    /// The changed files + diffs of `origin/<head>` against `origin/<base>`
+    /// (merge-base), i.e. exactly what a PR from `head` into `base` would show.
+    pub async fn review_snapshot(&self, base: &str, head: &str) -> AppResult<Snapshot> {
+        let g = self
+            .review_git()
+            .ok_or("branch review needs a git working copy")?;
+        Ok(snapshot_from_git(
+            g.diff(GitDiff::Rev(review_spec(base, head))).await?,
+        ))
+    }
+
+    /// The same branch-vs-base diff as one raw text block, for AI drafting.
+    pub async fn review_diff_text(&self, base: &str, head: &str) -> AppResult<String> {
+        let g = self
+            .review_git()
+            .ok_or("branch review needs a git working copy")?;
+        Ok(g.diff_text(GitDiff::Rev(review_spec(base, head))).await?)
+    }
+
+    /// Restore the working-copy content of `paths` to the `origin/<base>` side of
+    /// the branch-vs-base diff — no commit is made. The combined patch being
+    /// undone is written to a backup file in the temp dir *before* anything is
+    /// touched; reverse-applying it (`apply -R`) then deletes files the branch
+    /// added, recreates ones it deleted, and undoes edits/renames. Returns the
+    /// backup path (re-apply it with `git apply <file>` to take the revert back).
+    pub async fn revert_paths(
+        &self,
+        base: &str,
+        head: &str,
+        paths: &[String],
+    ) -> AppResult<PathBuf> {
+        let g = self.review_git().ok_or("revert needs a git working copy")?;
+        let dir = std::env::temp_dir().join("vcs-flow-commit");
+        std::fs::create_dir_all(&dir)?;
+        let backup = dir.join(format!("revert-{}.patch", backup_stamp()));
+        // A bespoke diff rather than the typed `diff()` raw blocks, written by
+        // git itself via `--output=<file>` so the patch bytes never round-trip
+        // through our process (the line-based String capture lossy-decodes
+        // non-UTF-8 bytes and rejoins CRLF as LF — breaking `apply` on entirely
+        // normal Windows files). `--binary` makes changed binaries revertible
+        // too (their parsed `raw` is only the "Binary files differ" stub, which
+        // `apply` rejects — and `apply` is atomic, so one binary would fail the
+        // whole revert). `--no-textconv` keeps configured textconv drivers from
+        // producing a non-applicable patch. `-M` keeps renames as renames; the
+        // pathspec limits the patch to the marked files (both sides of a rename
+        // are passed, so the pair stays detectable). Runs in the process cwd —
+        // `main` sets it to the repo root.
+        let mut diff_args = args(&[
+            "diff",
+            &review_spec(base, head),
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "-M",
+            &format!("--output={}", backup.display()),
+            "--",
+        ]);
+        diff_args.extend(paths.iter().cloned());
+        if let Err(e) = g.run(&diff_args).await {
+            // git may have created/truncated the file before failing — don't
+            // leave a stale, never-applied patch behind.
+            let _ = std::fs::remove_file(&backup);
+            return Err(e.into());
+        }
+        // With `--output` the patch lands in the file; stdout is empty.
+        if std::fs::metadata(&backup).map(|m| m.len()).unwrap_or(0) == 0 {
+            let _ = std::fs::remove_file(&backup);
+            return Err("nothing to revert for the selected paths".into());
+        }
+        g.run(&args(&["apply", "-R", &backup.to_string_lossy()]))
+            .await?;
+        Ok(backup)
+    }
+
     /// git-only: the repo-relative paths with unresolved (unmerged) conflicts.
     async fn git_conflicted_files(&self) -> AppResult<Vec<String>> {
         let Some(g) = self.repo.git_at() else {
@@ -562,6 +670,25 @@ fn git_behind_range(name: &str, remote_branch: &str) -> String {
 /// non-empty means the local bookmark is behind the remote.
 fn jj_behind_revset(name: &str, remote_branch: &str) -> String {
     format!("{remote_branch}@{REMOTE} ~ ::{name}")
+}
+
+/// Three-dot range `origin/<base>...origin/<head>`: the merge-base diff git (and
+/// GitHub) shows for a PR. Both sides are remote-tracking refs — fresh after the
+/// push — so local HEAD and working-copy state don't affect the result.
+fn review_spec(base: &str, head: &str) -> String {
+    format!("{REMOTE}/{base}...{REMOTE}/{head}")
+}
+
+/// Backup-file stamp: epoch milliseconds plus a per-process counter, so two
+/// reverts landing in the same millisecond can't overwrite each other's backup.
+fn backup_stamp() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{millis}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Strip the remote prefix from a `git upstream()` value (`origin/feat/x` → `feat/x`).
@@ -644,5 +771,11 @@ mod tests {
         assert_eq!(git_behind_range("feat", "main"), "feat..origin/main");
         // jj: remote-only commits relative to the local bookmark's ancestry.
         assert_eq!(jj_behind_revset("feat", "main"), "main@origin ~ ::feat");
+    }
+
+    #[test]
+    fn review_spec_is_three_dot_remote_range() {
+        // Merge-base diff between the remote-tracking refs — the PR view.
+        assert_eq!(review_spec("main", "feat/x"), "origin/main...origin/feat/x");
     }
 }

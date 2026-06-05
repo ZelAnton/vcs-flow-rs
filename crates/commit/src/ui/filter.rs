@@ -1,8 +1,9 @@
-//! A filterable list picker — used to choose an existing remote branch to push to
-//! when the local branch has no same-named remote. Type to narrow the list.
+//! A filterable list picker over remote branch names. Type to narrow the list.
 //!
-//! `Enter` picks the highlighted branch, `Ctrl+N` pushes as a new same-named branch,
-//! `Esc` cancels the push.
+//! `Enter` picks the highlighted branch, `Esc` cancels. An optional alternate
+//! action on `Ctrl+N` (e.g. "push as a new same-named branch" in the push flow)
+//! is offered only when the caller provides its hint text; the PR base picker
+//! passes `None` and gets a plain pick/cancel dialog.
 
 use std::io;
 
@@ -15,11 +16,11 @@ use crate::ui::terminal::Tui;
 
 /// What the user chose in the picker.
 pub enum Pick {
-    /// Attach to / push to this existing remote branch.
+    /// The highlighted existing remote branch.
     Existing(String),
-    /// Push as a new same-named remote branch.
+    /// The alternate `Ctrl+N` action (only when the caller offered one).
     NewBranch,
-    /// Cancel the push.
+    /// Cancel.
     Cancel,
 }
 
@@ -28,7 +29,12 @@ fn matches(item: &str, filter: &str) -> bool {
     filter.is_empty() || item.to_lowercase().contains(&filter.to_lowercase())
 }
 
-pub fn run(tui: &mut Tui, title: &str, items: &[String], new_name: &str) -> io::Result<Pick> {
+pub fn run(
+    tui: &mut Tui,
+    title: &str,
+    items: &[String],
+    alt_action: Option<&str>,
+) -> io::Result<Pick> {
     let mut filter = String::new();
     let mut state = ListState::default();
     state.select(Some(0));
@@ -84,11 +90,12 @@ pub fn run(tui: &mut Tui, title: &str, items: &[String], new_name: &str) -> io::
                     .style(Style::default().fg(Color::Yellow)),
                 rows[2],
             );
+            let hints = match alt_action {
+                Some(alt) => format!("Enter use highlighted   Ctrl+N {alt}   Esc cancel"),
+                None => "Enter use highlighted   Esc cancel".to_string(),
+            };
             frame.render_widget(
-                Paragraph::new(format!(
-                    "Enter use highlighted   Ctrl+N new '{new_name}'   Esc cancel"
-                ))
-                .style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new(hints).style(Style::default().fg(Color::DarkGray)),
                 rows[3],
             );
         })?;
@@ -101,7 +108,9 @@ pub fn run(tui: &mut Tui, title: &str, items: &[String], new_name: &str) -> io::
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('n' | 'N') if ctrl => return Ok(Pick::NewBranch),
+            KeyCode::Char('n' | 'N') if ctrl && alt_action.is_some() => {
+                return Ok(Pick::NewBranch);
+            }
             KeyCode::Char('c') if ctrl => return Ok(Pick::Cancel),
             KeyCode::Esc => return Ok(Pick::Cancel),
             KeyCode::Enter => {

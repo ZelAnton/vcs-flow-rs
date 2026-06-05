@@ -59,6 +59,12 @@ pub async fn offer(backend: &Backend, target: &crate::model::Target) -> crate::A
     let result = backend.push(&local, &remote_branch, set_upstream).await?;
     if result.is_success() {
         println!("Pushed '{local}' → origin/{remote_branch}.");
+        // Post-push GitHub PR step (list open PRs / offer to create one).
+        // Strictly best-effort: the push has succeeded, so even an unexpected
+        // error here is reduced to a dim notice rather than a failure.
+        if let Err(e) = crate::pr::after_push(backend, &remote_branch).await {
+            eprintln!("\x1b[2m(PR step skipped: {e})\x1b[0m");
+        }
     } else {
         // `diagnostic()` is stderr, else stdout (git sometimes writes there),
         // trimmed — so a stderr-silent rejection still reports something.
@@ -159,7 +165,8 @@ async fn integrate_with_pause(
 /// Re-enter the TUI briefly for the filterable remote-branch picker.
 fn pick_remote(title: &str, remotes: &[String], new_name: &str) -> crate::AppResult<Pick> {
     let (mut tui, _guard) = ui::terminal::TerminalGuard::enter()?;
-    let pick = ui::filter::run(&mut tui, title, remotes, new_name)?;
+    let alt = format!("new '{new_name}'");
+    let pick = ui::filter::run(&mut tui, title, remotes, Some(&alt))?;
     Ok(pick) // guard drops here → terminal restored before we print again
 }
 

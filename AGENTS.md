@@ -36,11 +36,18 @@ Key facts:
   see the `[workspace.dependencies]` comment) and `syntect` for diff highlighting.
   Its modules split cleanly: `vcs` (a `Backend` over `vcs_core::Repo` — facade
   methods + typed 0.4 client calls via the cwd-bound `repo.git_at()`/`repo.jj_at()` views,
-  with a few raw `run`s where no typed method exists), `tree` (path-compressed tree + tri-state
-  selection — pure, unit-tested), `model`, `ai` (Copilot-CLI commit-message
-  drafting via `processkit`), `settings` (per-user / per-repo AI model + pull-strategy
-  config, TOML), `push` (post-commit push: track → pull-if-behind → push), and
-  `ui/*` (ratatui screens, including the filterable `ui/filter` branch picker). The
+  with a few raw `run`s where no typed method exists, plus the git-only branch-vs-base
+  review/revert that uses a standalone `vcs_git::Git` for a jj repo's colocated `.git`),
+  `tree` (path-compressed tree + tri-state selection — pure, unit-tested), `model`,
+  `ai` (Copilot-CLI drafting via `processkit`: commit messages and PR title+body),
+  `ai_loop` (the shared spinner + model-retry loop both drafts use), `settings`
+  (per-user / per-repo AI model + pull-strategy config, TOML), `push` (post-commit
+  push: track → pull-if-behind → push), `pr` (post-push GitHub PR step via
+  `vcs-github`/`gh`: list open PRs with OSC 8 links, or offer to create one —
+  AI-drafted, edited, opened in the browser with `gh pr create --web` — with a
+  diff-review + bulk-revert mode; `serde_json` parses the raw `gh … --json`
+  escape-hatch output), and `ui/*` (ratatui screens, including the filterable
+  `ui/filter` branch picker and the `ui/review` branch-vs-base diff screen). The
   pure logic and command-arg builders are unit-tested; the live event loop needs
   a real terminal, so it's verified manually (`cargo run -p vcs-flow-commit`).
 

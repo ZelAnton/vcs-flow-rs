@@ -19,7 +19,7 @@ behavior in depth. This page is the index; the crate READMEs are the manuals.
 
 | Tool | Crate | Docs | What it does |
 |---|---|---|---|
-| `commit` | `vcs-flow-commit` | **[README »](crates/commit/README.md)** | Interactive TUI: pick changed files (ignoring the index), preview syntax-highlighted diffs, write a message (AI-drafted via Copilot), commit to **git** or **jj**, and optionally push. |
+| `commit` | `vcs-flow-commit` | **[README »](crates/commit/README.md)** | Interactive TUI: pick changed files (ignoring the index), preview syntax-highlighted diffs, write a message (AI-drafted via Copilot), commit to **git** or **jj**, optionally push — then surface or create the GitHub PR. |
 
 More tools land as their own `crates/<name>` member — add a row here and a
 `crates/<name>/README.md` alongside it. All crates share one version and release

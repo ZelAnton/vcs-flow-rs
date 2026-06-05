@@ -29,8 +29,14 @@ vcs-core.workspace = true
 # (typed diff, reachable bookmarks, resolve list, op log).
 vcs-jj.workspace = true
 # Typed git client (`DiffSpec`, `FileDiff`, conflict classifiers) reached via
-# `repo.git_at()` for diff, merge/rebase, rev-list, and the refspec push.
+# `repo.git_at()` for diff, merge/rebase, rev-list, and the refspec push. Also
+# constructed standalone for the colocated `.git` in a jj repo (PR diff review).
 vcs-git.workspace = true
+# Typed GitHub CLI client for the post-push PR step (`repo_view`, auth check,
+# raw `gh pr list/create` escape hatches) — see `pr.rs`.
+vcs-github.workspace = true
+# Parse the raw `gh pr list --json …` output into a small local struct.
+serde_json.workspace = true
 # Async runtime for the async `JjApi`/`GitApi` traits.
 tokio.workspace = true
 # Spawn the `copilot` CLI for AI message drafting inside a job, so the subprocess

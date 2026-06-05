@@ -1,5 +1,5 @@
-//! Terminal UI: the file-select, bookmark-menu, and message-editor screens, plus
-//! the terminal lifecycle and diff highlighting.
+//! Terminal UI: the file-select, bookmark-menu, message-editor, and PR
+//! diff-review screens, plus the terminal lifecycle and diff highlighting.
 
 pub mod busy;
 pub mod diff;
@@ -7,6 +7,7 @@ pub mod editor;
 pub mod filter;
 pub mod input;
 pub mod menu;
+pub mod review;
 pub mod select;
 pub mod terminal;
 
