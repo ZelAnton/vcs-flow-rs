@@ -101,6 +101,18 @@ fn checks_line(checks: &[Check]) -> Option<String> {
     Some(format!("checks: {}", parts.join(" ")))
 }
 
+/// Cap on every `gh` call of the PR step, armed via the toolkit's
+/// `default_timeout` (which *kills* a command exceeding the deadline and
+/// surfaces `Error::Timeout`). The step runs spinner-less right after the
+/// "Pushed …" line, so a hung network must degrade into the usual best-effort
+/// skip — never a silent freeze.
+const GH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether a `gh` failure was the [`GH_TIMEOUT`] deadline.
+fn is_timeout(e: &vcs_github::Error) -> bool {
+    matches!(e, vcs_github::Error::Timeout { .. })
+}
+
 /// Run the PR step after a successful push of `remote_branch`. Errors that
 /// reach the caller are unexpected (terminal/backend IO); everything
 /// GitHub-shaped is swallowed here with a dim notice at most.
@@ -114,12 +126,16 @@ pub async fn after_push(backend: &Backend, remote_branch: &str) -> AppResult<()>
         return Ok(());
     }
 
-    let client = GitHub::new();
+    let client = GitHub::new().default_timeout(GH_TIMEOUT);
     let gh = client.at(backend.root());
     match gh.auth_status().await {
         Ok(true) => {}
         Ok(false) => {
             dim("gh is not authenticated — run 'gh auth login' to enable the PR step");
+            return Ok(());
+        }
+        Err(e) if is_timeout(&e) => {
+            dim("GitHub is slow to respond — skipping the PR step");
             return Ok(());
         }
         Err(_) => {
@@ -129,16 +145,39 @@ pub async fn after_push(backend: &Backend, remote_branch: &str) -> AppResult<()>
     }
     // Failing to resolve the repo (e.g. the remote isn't reachable) just means
     // no PR step — the push itself is done.
-    let Ok(repo) = gh.repo_view().await else {
-        return Ok(());
+    let repo = match gh.repo_view().await {
+        Ok(repo) => repo,
+        Err(e) if is_timeout(&e) => {
+            dim("GitHub is slow to respond — skipping the PR step");
+            return Ok(());
+        }
+        Err(_) => return Ok(()),
     };
 
-    let prs = open_prs_for_branch(&gh, remote_branch).await;
+    // A timed-out listing must NOT fall through to "no PRs → offer to create
+    // one" — there may well be an open PR we just couldn't see. Any *other*
+    // listing failure keeps reading as "no PRs" (the create offer is the safe
+    // fallback there).
+    let prs = match open_prs_for_branch(&gh, remote_branch).await {
+        Ok(prs) => prs,
+        Err(e) if is_timeout(&e) => {
+            dim("GitHub is slow to respond — skipping the PR step");
+            return Ok(());
+        }
+        Err(_) => Vec::new(),
+    };
     if !prs.is_empty() {
         let plural = if prs.len() == 1 { "" } else { "s" };
         println!("\nOpen pull request{plural} for '{remote_branch}':");
         for pr in &prs {
-            println!("  #{} {}  → {}", pr.number, pr.title, pr.base);
+            // Title/base/url come from GitHub — strip terminal controls so a
+            // hostile PR title can't spoof lines or corrupt the terminal.
+            println!(
+                "  #{} {}  → {}",
+                pr.number,
+                sanitize_terminal(&pr.title),
+                sanitize_terminal(&pr.base)
+            );
             println!("      {}", osc8(&pr.url));
             if let Some(line) = checks_line(&pr.checks) {
                 println!("      {line}");
@@ -193,21 +232,26 @@ fn offer_open_in_browser(backend: &Backend, prs: &[OpenPr]) -> AppResult<()> {
     match out {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
+            // gh's stderr can echo remote-controlled names — strip controls.
             let err = String::from_utf8_lossy(&out.stderr);
-            dim(&format!("could not open the PR: {}", err.trim()));
+            dim(&format!(
+                "could not open the PR: {}",
+                sanitize_terminal(err.trim())
+            ));
         }
         Err(e) => dim(&format!("could not open the PR: {e}")),
     }
     Ok(())
 }
 
-/// All open PRs with head = `head`, into any base. Any failure (including
-/// malformed JSON) reads as "no PRs" — the create offer is the safe fallback.
+/// All open PRs with head = `head`, into any base. Malformed JSON reads as
+/// "no PRs"; subprocess failures surface so the caller can tell a timeout
+/// (skip the step) from an ordinary failure (treat as "no PRs").
 ///
 /// Raw `gh` because the typed API has no "open PRs by head into *any* base".
 /// Note `run` on the bound view is a *bare* forwarder — it executes in the
 /// process cwd, which `main` pins to the repo root (so `gh` resolves the repo).
-async fn open_prs_for_branch(gh: &GitHubAt<'_>, head: &str) -> Vec<OpenPr> {
+async fn open_prs_for_branch(gh: &GitHubAt<'_>, head: &str) -> vcs_github::Result<Vec<OpenPr>> {
     let argv = args(&[
         "pr",
         "list",
@@ -218,10 +262,7 @@ async fn open_prs_for_branch(gh: &GitHubAt<'_>, head: &str) -> Vec<OpenPr> {
         "--json",
         "number,title,baseRefName,url,statusCheckRollup",
     ]);
-    match gh.run(&argv).await {
-        Ok(json) => parse_open_prs(&json),
-        Err(_) => Vec::new(),
-    }
+    Ok(parse_open_prs(&gh.run(&argv).await?))
 }
 
 /// What the user answered to the create-PR question.
@@ -485,9 +526,14 @@ async fn create_pr(backend: &Backend, head: &str, base: &str) -> AppResult<()> {
     match out {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
+            // gh's stderr can echo remote-controlled names — strip controls.
             let err = String::from_utf8_lossy(&out.stderr);
-            let err = err.trim();
-            let err = if err.is_empty() { "(no output)" } else { err };
+            let err = sanitize_terminal(err.trim());
+            let err = if err.is_empty() {
+                "(no output)".to_string()
+            } else {
+                err
+            };
             dim(&format!("could not open the PR page: {err}"));
         }
         Err(e) => dim(&format!("could not open the PR page: {e}")),
@@ -569,10 +615,22 @@ fn find_pr_template(root: &Path) -> Option<String> {
     None
 }
 
+/// Strip terminal control characters (C0, DEL, C1 — incl. ESC and BEL) from an
+/// untrusted, remote-sourced string before a raw `println!`. A hostile PR
+/// title/URL must not be able to emit SGR/CSI/OSC sequences that spoof output
+/// or rewrite an OSC 8 link. TUI paths don't need this — ratatui renders into
+/// buffer cells, not a raw control stream.
+fn sanitize_terminal(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Wrap `url` in an OSC 8 hyperlink (clickable in Windows Terminal and most
 /// modern emulators). The visible text is the plain URL, so terminals without
 /// OSC 8 support still show — and often still linkify — the address itself.
+/// The url is control-stripped first: an embedded `ESC \` would otherwise
+/// terminate the link early and let the visible text point elsewhere.
 fn osc8(url: &str) -> String {
+    let url = sanitize_terminal(url);
     format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
 }
 
@@ -620,6 +678,23 @@ mod tests {
             osc8(url),
             "\x1b]8;;https://github.com/o/r/pull/12\x1b\\https://github.com/o/r/pull/12\x1b]8;;\x1b\\"
         );
+        // An embedded ESC-\ (OSC terminator) can't break out of the link.
+        let hostile = "https://evil/\x1b\\https://github.com/o/r";
+        assert_eq!(
+            osc8(hostile),
+            "\x1b]8;;https://evil/\\https://github.com/o/r\x1b\\https://evil/\\https://github.com/o/r\x1b]8;;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn sanitize_terminal_strips_controls_keeps_text() {
+        assert_eq!(
+            sanitize_terminal("Fix \x1b[31mred\x1b[0m bug\x07"),
+            "Fix [31mred[0m bug"
+        );
+        assert_eq!(sanitize_terminal("обычный títle"), "обычный títle");
+        assert_eq!(sanitize_terminal("tab\tand\nnewline"), "tabandnewline");
+        assert_eq!(sanitize_terminal(""), "");
     }
 
     #[test]

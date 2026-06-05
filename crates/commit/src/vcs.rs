@@ -410,6 +410,8 @@ impl Backend {
             // Explicitly `origin`: the push flow reasons about `origin/<rb>`. The
             // facade `repo.fetch()` / typed `g.fetch()` is bare `git fetch`, which
             // would fetch the branch's *configured* remote (not necessarily origin).
+            // (A typed `fetch_from(remote)` — with prompt-suppression and transient
+            // retry — exists only in the unreleased toolkit; adopt it when it ships.)
             g.run(&args(&["fetch", REMOTE])).await?;
         } else {
             // jj: `repo.fetch()` is `jj git fetch` — already the right thing.

@@ -49,8 +49,10 @@ vcs-jj = "0.4"
 # Typed GitHub CLI client (`GitHub` / `GitHubApi`). Drives `gh` through processkit.
 vcs-github = "0.4"
 # Async runtime: the VCS client traits are `async fn`, so every binary needs an
-# executor (`#[tokio::main]`).
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# executor (`#[tokio::main]`). `time` is used directly (the AI spinner's
+# interval) — named explicitly rather than relied on via feature unification
+# from other dependencies.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 # Declarative CLI arg parsing (derive). The shared front-end for every binary.
 clap = { version = "4", features = ["derive"] }
 # Serde + TOML for reading/writing the small per-user / per-repo settings files

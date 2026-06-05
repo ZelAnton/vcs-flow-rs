@@ -69,9 +69,12 @@ pub async fn offer(backend: &Backend, target: &crate::model::Target) -> crate::A
     } else {
         // `diagnostic()` is stderr, else stdout (git sometimes writes there),
         // trimmed — so a stderr-silent rejection still reports something.
-        let message = result.diagnostic();
+        // Control characters are stripped (newlines kept): push output echoes
+        // `remote:` lines the server controls, which must not be able to emit
+        // terminal escapes.
+        let message = sanitize_multiline(result.diagnostic());
         let message = if message.is_empty() {
-            "(no output)"
+            "(no output)".to_string()
         } else {
             message
         };
@@ -115,9 +118,11 @@ pub async fn offer_amend(backend: &Backend, target: &crate::model::Target) -> cr
             eprintln!("\x1b[2m(PR step skipped: {e})\x1b[0m");
         }
     } else {
-        let message = result.diagnostic();
+        // Control-stripped like the normal push: `remote:` lines are
+        // server-controlled.
+        let message = sanitize_multiline(result.diagnostic());
         let message = if message.is_empty() {
-            "(no output)"
+            "(no output)".to_string()
         } else {
             message
         };
@@ -220,6 +225,15 @@ fn pick_remote(title: &str, remotes: &[String], new_name: &str) -> crate::AppRes
     let alt = format!("new '{new_name}'");
     let pick = ui::filter::run(&mut tui, title, "Remote branches", remotes, Some(&alt))?;
     Ok(pick) // guard drops here → terminal restored before we print again
+}
+
+/// Strip terminal control characters from a multi-line subprocess diagnostic,
+/// keeping line breaks. Push output relays `remote:` lines the server authors —
+/// they must not be able to emit SGR/CSI/OSC escapes into our terminal.
+fn sanitize_multiline(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c == '\n' || !c.is_control())
+        .collect()
 }
 
 /// The repo root (process CWD, set in `main::run`), for settings lookup.
