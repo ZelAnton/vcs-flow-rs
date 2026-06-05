@@ -10,6 +10,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use crate::prompt::{confirm, confirm_no};
 use crate::settings::{self, PullStrategy};
 use crate::ui;
 use crate::ui::filter::Pick;
@@ -81,6 +82,51 @@ pub async fn offer(backend: &Backend, target: &crate::model::Target) -> crate::A
                  e.g. `git push --force-with-lease`.)"
             );
         }
+    }
+    Ok(())
+}
+
+/// Offer to push an *amended* commit. Rewriting a tip that's already on the
+/// remote needs a force push, so when the branch tracks a remote one this asks
+/// a default-**no** question and pushes with lease semantics (git
+/// `--force-with-lease`; jj's bookmark push is leased by design). Deliberately
+/// no fetch first — refreshing the remote-tracking ref would defeat the lease.
+/// An untracked branch has nothing remote to rewrite → the normal offer runs.
+pub async fn offer_amend(backend: &Backend, target: &crate::model::Target) -> crate::AppResult<()> {
+    let Some(name) = backend.push_name(target).await? else {
+        return Ok(()); // detached HEAD / no bookmark — nothing to push
+    };
+    let Some(remote_branch) = backend.upstream(&name).await? else {
+        return offer(backend, target).await; // never pushed — a plain push is safe
+    };
+
+    if !confirm_no(&format!(
+        "Force-push '{name}' to origin/{remote_branch}? This rewrites the remote tip."
+    ))? {
+        return Ok(());
+    }
+
+    println!("Pushing (force-with-lease)…");
+    let result = backend.push_force(&name, &remote_branch).await?;
+    if result.is_success() {
+        println!("Pushed '{name}' → origin/{remote_branch} (forced).");
+        // Post-push GitHub PR step — same best-effort hook as the normal push.
+        if let Err(e) = crate::pr::after_push(backend, &remote_branch).await {
+            eprintln!("\x1b[2m(PR step skipped: {e})\x1b[0m");
+        }
+    } else {
+        let message = result.diagnostic();
+        let message = if message.is_empty() {
+            "(no output)"
+        } else {
+            message
+        };
+        eprintln!("Push failed:\n{message}");
+        eprintln!(
+            "(A lease rejection means the remote moved since your last fetch — \
+             fetch, re-check the remote commits, and push manually if rewriting \
+             them is really intended.)"
+        );
     }
     Ok(())
 }
@@ -179,20 +225,6 @@ fn pick_remote(title: &str, remotes: &[String], new_name: &str) -> crate::AppRes
 /// The repo root (process CWD, set in `main::run`), for settings lookup.
 fn cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
-/// `[Y/n]` prompt, default yes. EOF (closed stdin) declines — never push without
-/// an explicit answer.
-fn confirm(question: &str) -> crate::AppResult<bool> {
-    print!("{question} [Y/n] ");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line)? == 0 {
-        println!();
-        return Ok(false); // EOF → decline
-    }
-    let a = line.trim();
-    Ok(a.is_empty() || a.eq_ignore_ascii_case("y"))
 }
 
 /// Wait for the user to resolve conflicts. Returns `true` if they chose to abort.

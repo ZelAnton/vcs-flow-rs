@@ -49,6 +49,14 @@ to a dated version section.
   **Conventional Commits** setting (`conventional` / `COMMIT_CONVENTIONAL`)
   steers the AI draft to `type(scope): subject` and falls back to a type picker
   when the draft has no recognized type.
+- `commit`: multi-commit sessions — after a commit, if changed files remain, the
+  tool offers another select-and-commit round (`[y/N]`, default no); the push
+  offer comes once at the end, for the last commit of the session.
+- `commit`: amended commits now get a guarded **force-push** offer (default-no
+  `[y/N]`) instead of being skipped: git pushes with `--force-with-lease`
+  (no pre-fetch, so the lease actually protects), jj's bookmark push is leased
+  by design; a never-pushed branch falls back to the normal push offer. The
+  GitHub PR step runs after a successful force push too.
 - `commit`: model selection with persistence. When copilot reports the configured
   model is unavailable, the TUI prompts for another name and saves the working one
   back to the source it came from (the per-repo file, else the per-user file). The

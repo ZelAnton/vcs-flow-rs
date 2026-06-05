@@ -601,6 +601,32 @@ impl Backend {
         }
     }
 
+    /// Force-push `name` to `origin/<remote_branch>` after an amend, with lease
+    /// semantics. git: `--force-with-lease` — refuses when the remote moved past
+    /// the local remote-tracking ref (so the caller must NOT fetch first). jj:
+    /// the plain bookmark push is the right command — jj itself refuses to push
+    /// over remote changes it hasn't seen, which *is* the lease.
+    pub async fn push_force(
+        &self,
+        name: &str,
+        remote_branch: &str,
+    ) -> AppResult<ProcessResult<String>> {
+        if let Some(g) = self.repo.git_at() {
+            Ok(g.run_raw(&args(&[
+                "push",
+                "--force-with-lease",
+                REMOTE,
+                &format!("{name}:{remote_branch}"),
+            ]))
+            .await?)
+        } else if let Some(j) = self.repo.jj_at() {
+            let _ = remote_branch; // jj pushes the bookmark to its own upstream
+            Ok(j.run_raw(&args(&["git", "push", "-b", name])).await?)
+        } else {
+            unreachable!()
+        }
+    }
+
     // ----- branch-vs-base review (post-push PR step) -------------------------
 
     /// Git view for the branch-vs-base (PR) review: the repo's own client for a

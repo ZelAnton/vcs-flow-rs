@@ -142,6 +142,11 @@ A multi-line editor, pre-filled:
 `Ctrl+Enter` / `Ctrl+S` commits; `Esc` cancels. An empty message (after trimming)
 aborts with `empty commit message — nothing committed`.
 
+After a commit, if changed files remain, `commit` asks
+`N changed files remain — commit more? [y/N]` — agree to run another
+select-and-commit round over the leftovers (as many rounds as you like; the
+push offer comes once, at the end of the session, for the last commit made).
+
 ## Keybindings
 
 **File-selection screen**
@@ -289,8 +294,13 @@ After a (non-amend) commit, `commit` offers to push to `origin`. On agreement it
 3. **Pushes**, setting upstream when the branch was untracked. On a GitHub repo
    the [PR step](#github-pull-requests) follows.
 
-Amended commits are **not** auto-pushed (rewriting an already-pushed tip needs a
-manual force push, e.g. `git push --force-with-lease`).
+**Amended commits** get a guarded offer instead: rewriting a tip that's already
+on the remote needs a force push, so `commit` asks a default-**no** question —
+`Force-push '<branch>' to origin/<remote>? This rewrites the remote tip. [y/N]`
+— and on agreement pushes with lease semantics (git `--force-with-lease`; jj's
+bookmark push refuses unseen remote changes by design). No fetch happens first
+(that would defeat the lease). If the branch was never pushed, an amend gets
+the normal push offer — there's nothing remote to rewrite.
 
 ## GitHub pull requests
 

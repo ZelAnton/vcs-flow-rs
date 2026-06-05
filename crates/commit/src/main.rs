@@ -9,6 +9,7 @@ mod ai;
 mod ai_loop;
 mod model;
 mod pr;
+mod prompt;
 mod push;
 mod settings;
 mod tree;
@@ -76,7 +77,7 @@ async fn run() -> AppResult<ExitCode> {
     // process cwd) and root-relative paths agree.
     std::env::set_current_dir(backend.root())?;
 
-    let snapshot = backend.snapshot().await?;
+    let mut snapshot = backend.snapshot().await?;
     if snapshot.changes.is_empty() {
         println!("Nothing to commit — no changed tracked files.");
         return Ok(ExitCode::SUCCESS);
@@ -86,44 +87,74 @@ async fn run() -> AppResult<ExitCode> {
         return Err("commit is interactive; run it in a terminal".into());
     }
 
-    let targets = backend.targets().await?;
-    let mut tree = TreeModel::build(&snapshot.changes);
     let highlighter = Highlighter::new();
+    // The last commit made this session — the push offer at the end targets it.
+    let mut last: Option<Plan> = None;
+    let mut round: u32 = 0;
 
-    // Interactive session: the terminal is restored when `guard` drops at the
-    // end of this block, before any commit output is printed.
-    let plan = {
-        let (mut tui, _guard) = TerminalGuard::enter()?;
-        interactive(
-            &mut tui,
-            &backend,
-            &snapshot,
-            &mut tree,
-            &targets,
-            args.amend,
-            &highlighter,
-        )
-        .await?
-    };
+    // Multi-commit session: after each commit, re-snapshot and offer another
+    // round over whatever is left, until nothing remains or the user stops.
+    loop {
+        if round > 0 {
+            snapshot = backend.snapshot().await?;
+            if snapshot.changes.is_empty() {
+                println!("Nothing left to commit.");
+                break;
+            }
+            let n = snapshot.changes.len();
+            let noun = if n == 1 { "file" } else { "files" };
+            if !prompt::confirm_no(&format!("{n} changed {noun} remain — commit more?"))? {
+                break;
+            }
+        }
 
-    let Some(plan) = plan else {
-        println!("Aborted — nothing committed.");
-        return Ok(ExitCode::SUCCESS);
-    };
+        // Fresh targets each round: a jj commit moves the bookmark (and `@`).
+        let targets = backend.targets().await?;
+        let mut tree = TreeModel::build(&snapshot.changes);
 
-    let paths = tree.selected_paths(&snapshot.changes);
-    // Count selected files for the summary, not emitted paths (a rename emits two).
-    let file_count = tree.selected_count();
-    backend
-        .commit(&paths, &plan.message, plan.amend, &plan.target)
-        .await?;
-    println!("{}", success_line(backend.kind(), &plan, file_count));
+        // Interactive session: the terminal is restored when `guard` drops at
+        // the end of this block, before any commit output is printed.
+        let plan = {
+            let (mut tui, _guard) = TerminalGuard::enter()?;
+            interactive(
+                &mut tui,
+                &backend,
+                &snapshot,
+                &mut tree,
+                &targets,
+                args.amend && round == 0, // `--amend` applies to the first round
+                &highlighter,
+            )
+            .await?
+        };
 
-    // Offer to push the fresh commit. Skipped for amend: rewriting an already-pushed
-    // tip needs a force push, which is out of scope (and the behind-check would try
-    // to merge the pre-amend remote commit back in).
-    if !plan.amend {
-        push::offer(&backend, &plan.target).await?;
+        let Some(plan) = plan else {
+            if round == 0 {
+                println!("Aborted — nothing committed.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            break; // a later-round cancel still push-offers the earlier commits
+        };
+
+        let paths = tree.selected_paths(&snapshot.changes);
+        // Count selected files for the summary, not emitted paths (a rename emits two).
+        let file_count = tree.selected_count();
+        backend
+            .commit(&paths, &plan.message, plan.amend, &plan.target)
+            .await?;
+        println!("{}", success_line(backend.kind(), &plan, file_count));
+        last = Some(plan);
+        round += 1;
+    }
+
+    // One push offer for the session, aimed at the last commit. An amend
+    // rewrites the tip, so its offer is the guarded force-push variant.
+    if let Some(plan) = last {
+        if plan.amend {
+            push::offer_amend(&backend, &plan.target).await?;
+        } else {
+            push::offer(&backend, &plan.target).await?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
