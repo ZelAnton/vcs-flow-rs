@@ -88,7 +88,7 @@ commit --help     # full flag list
 
 `commit` is interactive: if stdin/stdout isn't a terminal it exits with
 `commit is interactive; run it in a terminal`. If there are no changed tracked
-files it prints `Nothing to commit` and exits 0.
+files it prints `Nothing to commit — no changed tracked files.` and exits 0.
 
 ## The interactive flow
 
@@ -182,10 +182,10 @@ push offer comes once, at the end of the session, for the last commit made).
 | Key | Action |
 |---|---|
 | `↑` `↓` | Move |
-| *(typing)* | Filter the list (branch pickers only) |
+| *(typing)* | Filter the list (filterable pickers — branches, commit types) |
 | `Enter` | Choose the highlighted entry |
 | `Ctrl+N` | Push as a new same-named branch (push-target picker only) |
-| `Esc` | Cancel |
+| `Esc` | Cancel (`q` also cancels the bookmark picker) |
 
 **Diff review** ([PR step](#reviewing-the-branch-diff-and-reverting))
 
@@ -390,6 +390,9 @@ The revert is **all-or-nothing** (`git apply` is atomic): if a marked file also
 carries *uncommitted* local edits, the patch no longer matches and the whole
 revert fails with nothing changed — commit or stash those edits first.
 
+Backup patches are kept (they're your undo) and never auto-deleted — sweep
+`<temp>/vcs-flow-commit/` yourself when they pile up.
+
 ## Behavior & edge cases
 
 - **No staging area.** git selection ignores the index entirely; only the files
@@ -399,7 +402,7 @@ revert fails with nothing changed — commit or stash those edits first.
   stages them with `git add --intent-to-add` first, so `--only` accepts them.
   jj tracks new files automatically, so they appear as `A` there.
 - **Empty / unborn repo.** With no changed tracked files, `commit` prints
-  `Nothing to commit` and exits without entering the UI.
+  *nothing to commit* and exits without entering the UI.
 - **Renames** show as a single `R old → new` entry and commit both sides.
 - **Non-interactive** invocations (piped stdin/stdout) are refused up front.
 - **Exit codes:** `0` on a successful commit, a clean cancel, or "nothing to

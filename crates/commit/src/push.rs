@@ -45,8 +45,8 @@ pub async fn offer(backend: &Backend, target: &crate::model::Target) -> crate::A
         if backend.working_tree_dirty().await? {
             println!(
                 "'{local}' is behind origin/{remote_branch}, but the working tree has \
-                 uncommitted changes. Commit or stash them and pull manually, then push. \
-                 Nothing pushed."
+                 uncommitted changes (e.g. files or hunks left out of the commit). \
+                 Commit or stash them and pull manually, then push. Nothing pushed."
             );
             return Ok(());
         }

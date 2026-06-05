@@ -146,9 +146,20 @@ async fn run() -> AppResult<ExitCode> {
         let partial = tree.selected_partial(&snapshot.changes);
         // Count selected files for the summary, not emitted paths (a rename emits two).
         let file_count = tree.selected_count();
-        backend
+        if let Err(e) = backend
             .commit(&whole, &partial, &plan.message, plan.amend, &plan.target)
-            .await?;
+            .await
+        {
+            // A first-round failure is the session failing. A *later*-round
+            // failure must not abandon the commits already made — report it
+            // and fall through to their push offer.
+            if round == 0 {
+                return Err(e);
+            }
+            eprintln!("commit: {e}");
+            eprintln!("(the session's earlier commits are intact — continuing to the push offer)");
+            break;
+        }
         println!("{}", success_line(backend.kind(), &plan, file_count));
         last = Some(plan);
         round += 1;

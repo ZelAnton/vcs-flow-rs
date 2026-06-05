@@ -293,18 +293,43 @@ impl Backend {
                 ]);
                 squash.extend(filesets.iter().map(|f| f.as_str().to_string()));
                 j.run(&squash).await?;
-                // Apply the chosen message only if the user changed it (the squash
-                // kept the bookmark's prior message).
-                let current = self.message_for(target, true).await?;
-                if current.trim() != message.trim() {
-                    j.run(&args(&["describe", "-r", &target.label, "-m", message]))
-                        .await?;
+                // The squash has landed — the message touch-up below is
+                // best-effort: failing it must not turn the finished amend into
+                // a process failure (the exit-code contract is "0 on a
+                // successful commit"). Apply the chosen message only if the
+                // user changed it (the squash kept the bookmark's prior one).
+                match self.message_for(target, true).await {
+                    Ok(current) if current.trim() != message.trim() => {
+                        if let Err(e) = j
+                            .run(&args(&["describe", "-r", &target.label, "-m", message]))
+                            .await
+                        {
+                            eprintln!(
+                                "(note: the amend landed, but updating its message failed: {e} — \
+                                 set it manually with `jj describe -r {}`)",
+                                target.label
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!(
+                        "(note: the amend landed, but re-reading its message failed: {e})"
+                    ),
                 }
             } else {
                 j.commit_paths(&filesets, message).await?;
                 // Advance the chosen bookmark onto the finalised commit (`@-`).
-                if !target.label.is_empty() {
-                    j.bookmark_set(&target.label, "@-").await?;
+                // Best-effort for the same reason: the commit exists; a failed
+                // bookmark move is reported with the manual fix instead of
+                // masking the success with a failure exit.
+                if !target.label.is_empty()
+                    && let Err(e) = j.bookmark_set(&target.label, "@-").await
+                {
+                    eprintln!(
+                        "(note: the commit was created, but moving bookmark '{0}' onto it \
+                         failed: {e} — move it manually: `jj bookmark set {0} -r @-`)",
+                        target.label
+                    );
                 }
             }
         } else {
@@ -483,9 +508,13 @@ impl Backend {
                 Err(_) => Ok(false), // the remote ref isn't present locally → not behind
             }
         } else if let Some(j) = self.repo.jj_at() {
-            Ok(j.commit_count(&jj_behind_revset(name, remote_branch))
-                .await?
-                > 0)
+            // Same defensive mapping as git: an unresolvable `<rb>@origin`
+            // (remote bookmark missing/odd shape) reads as "not behind" rather
+            // than failing the push offer after a successful commit.
+            match j.commit_count(&jj_behind_revset(name, remote_branch)).await {
+                Ok(n) => Ok(n > 0),
+                Err(_) => Ok(false),
+            }
         } else {
             unreachable!()
         }
@@ -935,10 +964,17 @@ async fn commit_partial_steps(
     //    `git commit` does this itself); stale entries would show up as
     //    phantom staged changes in `git status` — and falsely trip the
     //    dirty-tree guard before an integration. Working tree untouched.
+    //    Best-effort: HEAD has already moved, the commit IS made — an index
+    //    cosmetic must not turn it into a process failure.
     let mut rs = args(&["reset", "-q", "--"]);
     rs.extend(whole.iter().cloned());
     rs.extend(partial.iter().map(|(p, _)| p.clone()));
-    plumb_real(root, rs).await?;
+    if let Err(e) = plumb_real(root, rs).await {
+        eprintln!(
+            "(note: the commit landed, but refreshing the index failed: {e} — \
+             `git status` may show phantom staged changes until a `git reset`)"
+        );
+    }
     Ok(())
 }
 

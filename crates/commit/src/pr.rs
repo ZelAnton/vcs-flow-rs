@@ -257,6 +257,9 @@ async fn create_pr_loop(
     backups: &mut Vec<PathBuf>,
 ) -> AppResult<()> {
     let mut base = initial_base;
+    // Lazy: loading the syntect dumps costs ~100 ms — pay it on the first `d`,
+    // and only once per flow (not per review re-entry).
+    let mut highlighter: Option<Highlighter> = None;
     println!("\nNo open pull request for '{head}'.");
     loop {
         match ask_create(head, &base)? {
@@ -267,7 +270,8 @@ async fn create_pr_loop(
                 Err(e) => eprintln!("Base picker unavailable: {e}"),
             },
             Answer::Diff => {
-                if let Err(e) = review_loop(backend, head, &base, reverted, backups).await {
+                let hl = highlighter.get_or_insert_with(Highlighter::new);
+                if let Err(e) = review_loop(backend, head, &base, hl, reverted, backups).await {
                     eprintln!("Diff review unavailable: {e}");
                 }
             }
@@ -331,6 +335,7 @@ async fn review_loop(
     backend: &Backend,
     head: &str,
     base: &str,
+    highlighter: &Highlighter,
     reverted: &mut Vec<String>,
     backups: &mut Vec<PathBuf>,
 ) -> AppResult<()> {
@@ -345,13 +350,12 @@ async fn review_loop(
         println!("'{head}' has no changes against '{base}'{qualifier}.");
         return Ok(());
     }
-    let highlighter = Highlighter::new();
 
     loop {
         let mut tree = TreeModel::build(&snap.changes);
         let outcome = {
             let (mut tui, _guard) = ui::terminal::TerminalGuard::enter()?;
-            ui::review::run(&mut tui, &snap, &mut tree, head, base, &highlighter)?
+            ui::review::run(&mut tui, &snap, &mut tree, head, base, highlighter)?
         }; // guard dropped → normal terminal for the revert/output below
 
         match outcome {
