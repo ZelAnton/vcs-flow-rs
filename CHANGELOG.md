@@ -58,6 +58,8 @@ to a dated version section.
   the working tree and real index are never touched, unselected hunks stay put,
   and an amend keeps all of the tip's parents. Limits: this path skips commit
   hooks and `commit.gpgsign`. jj stays whole-file (no non-interactive split).
+- `commit`: pushing the repository's **default branch** no longer offers to
+  create a PR (nothing to merge it into); open PRs *from* it are still listed.
 - `commit`: PR-step polish — the open-PR listing shows a CI summary per PR
   (`checks: ✓ ✗ ●` from `statusCheckRollup`) and offers to open a listed PR in
   the browser (`gh pr view --web`); PR creation fills the repository's

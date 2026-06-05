@@ -339,7 +339,9 @@ Open it in the browser? [y/N]
 Agreeing opens the PR with `gh pr view --web` (with several PRs listed, you're
 asked for the number instead).
 
-**If there are none**, `commit` offers to create one:
+**If there are none**, `commit` offers to create one — unless the pushed branch
+*is* the repository's default branch (there's nothing it would merge into, so
+the step ends quietly):
 
 ```text
 No open pull request for 'feature/login'.

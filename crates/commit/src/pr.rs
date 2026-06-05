@@ -148,7 +148,14 @@ pub async fn after_push(backend: &Backend, remote_branch: &str) -> AppResult<()>
         return Ok(());
     }
 
-    create_pr_flow(backend, remote_branch, default_base(&repo)).await
+    // Pushing the default branch itself: there's nothing it would merge into
+    // by default, so don't offer to create a PR. (Existing PRs *from* it —
+    // e.g. main → release — were still listed above.)
+    let base = default_base(&repo);
+    if remote_branch == base {
+        return Ok(());
+    }
+    create_pr_flow(backend, remote_branch, base).await
 }
 
 /// Offer to open one of the listed PRs in the browser (`gh pr view --web`).
