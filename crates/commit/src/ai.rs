@@ -68,9 +68,17 @@ pub async fn generate(diff: &str, existing: &str, model: &str, conventional: boo
 }
 
 /// Draft a PR title (first line) + markdown body from the branch-vs-base
-/// `diff`, optionally filling in the repository's PR `template`.
-pub async fn generate_pr(diff: &str, model: &str, template: Option<&str>) -> Outcome {
-    run_copilot(&build_pr_prompt(diff, template), model).await
+/// `diff`, the branch's own `commits` messages (the WHY the diff can't show),
+/// and — when present — its `changelog` changes (the authoritative user-facing
+/// summary), optionally filling in the repository's PR `template`.
+pub async fn generate_pr(
+    diff: &str,
+    model: &str,
+    template: Option<&str>,
+    commits: &str,
+    changelog: Option<&str>,
+) -> Outcome {
+    run_copilot(&build_pr_prompt(diff, template, commits, changelog), model).await
 }
 
 /// Run one copilot attempt for `prompt` and classify the result.
@@ -151,9 +159,22 @@ fn build_commit_prompt(diff: &str, existing: &str, conventional: bool) -> String
 /// stay under the OS command-line limit.
 const TEMPLATE_LIMIT: usize = 4000;
 
+/// Cap the branch's commit messages embedded in the PR prompt.
+const COMMITS_LIMIT: usize = 2500;
+
+/// Cap the CHANGELOG.md diff embedded in the PR prompt. Extracted separately
+/// from the main diff so the [`DIFF_LIMIT`] truncation can never drop it.
+const CHANGELOG_LIMIT: usize = 3000;
+
 /// Assemble the PR title+description prompt: preamble, the repo's PR template
-/// to fill in (when present), then the (truncated) diff.
-fn build_pr_prompt(diff: &str, template: Option<&str>) -> String {
+/// to fill in (when present), the branch's commit messages, its CHANGELOG.md
+/// changes (when present), then the (truncated) diff.
+fn build_pr_prompt(
+    diff: &str,
+    template: Option<&str>,
+    commits: &str,
+    changelog: Option<&str>,
+) -> String {
     let mut prompt = String::from(PR_PROMPT_PREAMBLE);
     if let Some(t) = template
         && !t.trim().is_empty()
@@ -163,6 +184,23 @@ fn build_pr_prompt(diff: &str, template: Option<&str>) -> String {
              replace placeholders and comments with real content):\n",
         );
         prompt.push_str(&truncate(t.trim(), TEMPLATE_LIMIT));
+    }
+    let commits = commits.trim();
+    if !commits.is_empty() {
+        prompt.push_str(
+            "\n\nThe branch's commit messages, newest first — use them for the \
+             intent and the WHY:\n",
+        );
+        prompt.push_str(&truncate(commits, COMMITS_LIMIT));
+    }
+    if let Some(cl) = changelog
+        && !cl.trim().is_empty()
+    {
+        prompt.push_str(
+            "\n\nThe branch's CHANGELOG.md changes — the authoritative user-facing \
+             summary; reflect them prominently in the description:\n",
+        );
+        prompt.push_str(&truncate(cl.trim(), CHANGELOG_LIMIT));
     }
     prompt.push_str("\n\n");
     prompt.push_str(&truncate(diff, DIFF_LIMIT));
@@ -229,26 +267,56 @@ mod tests {
 
     #[test]
     fn pr_prompt_is_preamble_plus_truncated_diff() {
-        let p = build_pr_prompt("diff body", None);
+        let p = build_pr_prompt("diff body", None, "", None);
         assert!(p.starts_with(PR_PROMPT_PREAMBLE));
         assert!(p.ends_with("diff body"));
-        // No commit-only context block sneaks in.
+        // None of the optional context blocks sneak in.
         assert!(!p.contains("Current draft description"));
         assert!(!p.contains("PR template"));
+        assert!(!p.contains("commit messages"));
+        assert!(!p.contains("CHANGELOG.md changes"));
         // The diff cap applies here too.
         let long = "x".repeat(DIFF_LIMIT + 100);
-        assert!(build_pr_prompt(&long, None).ends_with("... (truncated)"));
+        assert!(build_pr_prompt(&long, None, "", None).ends_with("... (truncated)"));
     }
 
     #[test]
     fn pr_prompt_embeds_template_when_present() {
-        let p = build_pr_prompt("diff body", Some("## Summary\n<!-- what -->"));
+        let p = build_pr_prompt("diff body", Some("## Summary\n<!-- what -->"), "", None);
         assert!(p.contains("PR template"));
         assert!(p.contains("## Summary"));
         assert!(p.ends_with("diff body"));
         // A blank template is treated as absent.
-        let blank = build_pr_prompt("diff body", Some("   "));
+        let blank = build_pr_prompt("diff body", Some("   "), "", None);
         assert!(!blank.contains("PR template"));
+    }
+
+    #[test]
+    fn pr_prompt_embeds_commits_and_changelog_blocks() {
+        let p = build_pr_prompt(
+            "diff body",
+            None,
+            "feat: add picker\n\nfix: clamp scroll\n",
+            Some("diff --git a/CHANGELOG.md b/CHANGELOG.md\n+- new entry\n"),
+        );
+        assert!(p.contains("commit messages"));
+        assert!(p.contains("feat: add picker"));
+        assert!(p.contains("CHANGELOG.md changes"));
+        assert!(p.contains("+- new entry"));
+        assert!(p.ends_with("diff body"));
+        // Order: template-less prompt is preamble → commits → changelog → diff.
+        let commits_at = p.find("commit messages").unwrap();
+        let changelog_at = p.find("CHANGELOG.md changes").unwrap();
+        let diff_at = p.rfind("diff body").unwrap();
+        assert!(commits_at < changelog_at && changelog_at < diff_at);
+        // Blank commits / changelog are treated as absent.
+        let blank = build_pr_prompt("diff body", None, "  \n", Some("  "));
+        assert!(!blank.contains("commit messages"));
+        assert!(!blank.contains("CHANGELOG.md changes"));
+        // Both blocks are capped.
+        let long = "y".repeat(COMMITS_LIMIT + 100);
+        let p = build_pr_prompt("d", None, &long, None);
+        assert!(p.contains("... (truncated)"));
     }
 
     #[test]

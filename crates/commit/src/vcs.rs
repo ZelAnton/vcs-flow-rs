@@ -743,6 +743,37 @@ impl Backend {
         Ok(g.diff_text(GitDiff::Rev(review_spec(base, head))).await?)
     }
 
+    /// The branch's own commit messages (subject + body, newest first), as
+    /// PR-draft context. Callers treat an error as "no commit context"
+    /// (best-effort). Works for jj too: the colocated git log carries the jj
+    /// descriptions.
+    pub async fn review_log(&self, base: &str, head: &str) -> AppResult<Vec<String>> {
+        let g = self
+            .review_git()
+            .ok_or("branch review needs a git working copy")?;
+        // `%x1f` (unit separator) marks each record: bodies have no reliable
+        // terminator, so `%s%n%b` records would otherwise run together.
+        // `--no-merges`: merge commits carry no PR-worthy narrative. `-n 30`
+        // caps the subprocess output; the AI prompt caps its block again.
+        let out = g
+            .run(&args(&[
+                "log",
+                &review_log_range(base, head),
+                "--no-color",
+                "--no-merges",
+                "-n",
+                "30",
+                "--format=%x1f%s%n%b",
+            ]))
+            .await?;
+        Ok(out
+            .split('\u{1f}')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     /// Restore the working-copy content of `paths` to the `origin/<base>` side of
     /// the branch-vs-base diff — no commit is made. The combined patch being
     /// undone is written to a backup file in the temp dir *before* anything is
@@ -1051,6 +1082,13 @@ fn jj_behind_revset(name: &str, remote_branch: &str) -> String {
 /// push — so local HEAD and working-copy state don't affect the result.
 fn review_spec(base: &str, head: &str) -> String {
     format!("{REMOTE}/{base}...{REMOTE}/{head}")
+}
+
+/// Two-dot range for `git log`: the commits the PR would carry (reachable from
+/// the head, not from the base). NOT the three-dot diff spec — for `log`, `...`
+/// means the symmetric difference.
+fn review_log_range(base: &str, head: &str) -> String {
+    format!("{REMOTE}/{base}..{REMOTE}/{head}")
 }
 
 /// The untracked (`?? `) paths from `status --porcelain=v1 -z` output. `-z`
@@ -1405,5 +1443,15 @@ mod tests {
     fn review_spec_is_three_dot_remote_range() {
         // Merge-base diff between the remote-tracking refs — the PR view.
         assert_eq!(review_spec("main", "feat/x"), "origin/main...origin/feat/x");
+    }
+
+    #[test]
+    fn review_log_range_is_two_dot() {
+        // For `log`, two-dot = the branch's own commits (three-dot would be
+        // the symmetric difference — wrong here).
+        assert_eq!(
+            review_log_range("main", "feat/x"),
+            "origin/main..origin/feat/x"
+        );
     }
 }

@@ -415,21 +415,37 @@ async fn create_pr(backend: &Backend, head: &str, base: &str) -> AppResult<()> {
     // gh's own template auto-fill is bypassed when `--body` is given, so the
     // template must be folded into our draft instead.
     let template = find_pr_template(backend.root());
+    // The branch's own commit messages: the WHY the diff can't show. Best-effort
+    // — no log just means less context for the draft.
+    let commit_msgs = backend.review_log(base, head).await.unwrap_or_default();
+    let commits = commit_msgs.join("\n\n");
+    // CHANGELOG.md changes are the authoritative user-facing summary; extracted
+    // separately so the diff cap can never truncate them away.
+    let changelog = extract_changelog_diff(&diff);
 
     let edited = {
         let (mut tui, _guard) = ui::terminal::TerminalGuard::enter()?;
         // Fallback when drafting is skipped or fails: the branch name as a
-        // minimal title, plus the raw template (if any) to fill by hand.
-        let fallback = match &template {
-            Some(t) => format!("{head}\n\n{t}"),
-            None => head.to_string(),
-        };
+        // minimal title, the branch's commit subjects as a starting outline,
+        // plus the raw template (if any) to fill by hand.
+        let mut fallback = head.to_string();
+        let subjects = commit_subjects(&commit_msgs);
+        if !subjects.is_empty() {
+            fallback.push_str("\n\n");
+            fallback.push_str(&subjects);
+        }
+        if let Some(t) = &template {
+            fallback.push_str("\n\n");
+            fallback.push_str(t);
+        }
         let draft = ai_loop::draft_with_retry(
             &mut tui,
             backend.root(),
             ai_loop::Draft::Pr {
                 diff: &diff,
                 template: template.as_deref(),
+                commits: &commits,
+                changelog: changelog.as_deref(),
             },
             "Generating PR title and description…",
             &fallback,
@@ -483,6 +499,44 @@ async fn create_pr(backend: &Backend, head: &str, base: &str) -> AppResult<()> {
 /// empty list.
 fn parse_open_prs(json: &str) -> Vec<OpenPr> {
     serde_json::from_str(json).unwrap_or_default()
+}
+
+/// The `diff --git` section of the file whose basename is `CHANGELOG.md` (root
+/// or nested), out of the combined branch diff. `None` when absent. Used to
+/// give the changelog changes guaranteed, prioritized space in the AI prompt.
+///
+/// The file is identified by its `+++ b/<path>` line, not the `diff --git`
+/// header — the header is ambiguous for unquoted paths with spaces, while the
+/// `+++` line carries exactly one path (the same trick the toolkit's own diff
+/// parser uses).
+fn extract_changelog_diff(diff: &str) -> Option<String> {
+    let mut sections: Vec<String> = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            sections.push(String::new());
+        }
+        if let Some(s) = sections.last_mut() {
+            s.push_str(line);
+            s.push('\n');
+        }
+    }
+    sections.into_iter().find(|s| {
+        s.lines().any(|l| {
+            l.strip_prefix("+++ b/")
+                .is_some_and(|p| p == "CHANGELOG.md" || p.ends_with("/CHANGELOG.md"))
+        })
+    })
+}
+
+/// The subject (first) line of each commit message, as a `- ` list — the
+/// manual-editing starting outline when the AI draft is unavailable.
+fn commit_subjects(messages: &[String]) -> String {
+    messages
+        .iter()
+        .filter_map(|m| m.lines().next())
+        .map(|s| format!("- {s}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The repository's PR template, from the locations GitHub itself recognises
@@ -648,6 +702,48 @@ mod tests {
             "checks: ✓1"
         );
         assert!(checks_line(&[]).is_none());
+    }
+
+    #[test]
+    fn extracts_changelog_section_from_combined_diff() {
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n\
+                    +++ b/src/lib.rs\n+code\n\
+                    diff --git a/CHANGELOG.md b/CHANGELOG.md\nindex 1..2\n\
+                    --- a/CHANGELOG.md\n+++ b/CHANGELOG.md\n+- new entry\n\
+                    diff --git a/README.md b/README.md\n--- a/README.md\n\
+                    +++ b/README.md\n+docs\n";
+        let section = extract_changelog_diff(diff).unwrap();
+        assert!(section.starts_with("diff --git a/CHANGELOG.md"));
+        assert!(section.contains("+- new entry"));
+        // The next file's section is excluded.
+        assert!(!section.contains("README.md"));
+        assert!(!section.contains("+code"));
+
+        // Nested path matches by basename; lookalike names don't.
+        let nested = "diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md\n\
+                      +++ b/docs/CHANGELOG.md\n+x\n";
+        assert!(extract_changelog_diff(nested).is_some());
+        let lookalike =
+            "diff --git a/NOT_CHANGELOG.md b/NOT_CHANGELOG.md\n+++ b/NOT_CHANGELOG.md\n+x\n";
+        assert!(extract_changelog_diff(lookalike).is_none());
+        // A dir with spaces (unquoted in the header) is matched via `+++ b/`.
+        let spaced = "diff --git a/my docs/CHANGELOG.md b/my docs/CHANGELOG.md\n\
+                      +++ b/my docs/CHANGELOG.md\n+x\n";
+        assert!(extract_changelog_diff(spaced).is_some());
+        assert!(extract_changelog_diff("").is_none());
+    }
+
+    #[test]
+    fn commit_subjects_lists_first_lines() {
+        let msgs = vec![
+            "feat: add picker\n\nLong body\nwith - a list line".to_string(),
+            "fix: clamp scroll".to_string(),
+        ];
+        assert_eq!(
+            commit_subjects(&msgs),
+            "- feat: add picker\n- fix: clamp scroll"
+        );
+        assert_eq!(commit_subjects(&[]), "");
     }
 
     #[test]

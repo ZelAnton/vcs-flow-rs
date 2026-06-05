@@ -353,11 +353,15 @@ Create a pull request 'feature/login' → 'main'?  [Y]es / [n]o / [b]ase / [d]if
 - `d` opens the [diff review](#reviewing-the-branch-diff-and-reverting) of the
   branch against the current base, then re-asks.
 - `Y`/`Enter` proceeds: the PR **title + markdown description** are
-  [AI-drafted](#ai-commit-messages) from the branch-vs-base diff (same Copilot
-  machinery, spinner, `Esc` to skip, model retry). If the repository has a
-  **PR template** (`pull_request_template.md` in `.github/`, the root, or
-  `docs/` — any case), the AI is asked to fill it in; without Copilot the raw
-  template is pre-filled for you to complete. You edit the result in the
+  [AI-drafted](#ai-commit-messages) from the branch-vs-base diff, the branch's
+  own **commit messages** (the *why* a diff can't show), and — with priority —
+  its **`CHANGELOG.md` changes** when the diff touches one (they're treated as
+  the authoritative user-facing summary and can't be lost to the diff-size
+  cap). Same Copilot machinery: spinner, `Esc` to skip, model retry. If the
+  repository has a **PR template** (`pull_request_template.md` in `.github/`,
+  the root, or `docs/` — any case), the AI is asked to fill it in; without
+  Copilot the branch's commit subjects and the raw template are pre-filled for
+  you to complete. You edit the result in the
   multi-line editor — **first line = title**, the rest (after a blank line) =
   description — then answer `Open it as a draft PR? [y/N]`. Confirming opens
   the GitHub **PR-creation page in your browser** with everything prefilled

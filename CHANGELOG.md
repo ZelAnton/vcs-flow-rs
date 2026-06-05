@@ -58,6 +58,11 @@ to a dated version section.
   the working tree and real index are never touched, unselected hunks stay put,
   and an amend keeps all of the tip's parents. Limits: this path skips commit
   hooks and `commit.gpgsign`. jj stays whole-file (no non-interactive split).
+- `commit`: the AI PR draft now also feeds on the branch's **commit messages**
+  (newest first, merges excluded) and gives **priority to `CHANGELOG.md`
+  changes** found in the branch diff (extracted separately, so the diff-size
+  cap can't drop them); without Copilot the commit subjects seed the manual
+  draft.
 - `commit`: pushing the repository's **default branch** no longer offers to
   create a PR (nothing to merge it into); open PRs *from* it are still listed.
 - `commit`: PR-step polish — the open-PR listing shows a CI summary per PR
