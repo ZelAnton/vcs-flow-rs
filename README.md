@@ -11,6 +11,8 @@ clients [`vcs-git`](https://crates.io/crates/vcs-git),
 [`vcs-github`](https://crates.io/crates/vcs-github), and the job-backed process
 launcher [`processkit`](https://crates.io/crates/processkit).
 
+![Cover](cover.png)
+
 ## Tools
 
 Each tool lives in its own `crates/<name>` member and has **its own README**
